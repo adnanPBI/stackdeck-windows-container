@@ -1,0 +1,22 @@
+[package]
+name = "pystack-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Web GUI for PyStack Runner"
+
+[dependencies]
+pystack-types = { workspace = true }
+pystack-process = { workspace = true }
+pystack-hyperv = { workspace = true }
+pystack-state = { workspace = true }
+axum = { workspace = true }
+askama = { workspace = true }
+subtle = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

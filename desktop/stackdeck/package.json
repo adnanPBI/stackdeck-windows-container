@@ -1,0 +1,28 @@
+{
+  "name": "stackdeck",
+  "private": true,
+  "version": "0.5.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4173",
+    "tauri": "tauri",
+    "build:hive": "cargo build -p pystack-cli --bin hive --release --locked",
+    "stage:hive": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/stage-hive.ps1",
+    "package:windows": "npm run build:hive && npm run stage:hive && tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.5.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.5.0",
+    "@types/react": "^18.2.66",
+    "@types/react-dom": "^18.2.22",
+    "@vitejs/plugin-react": "^4.2.1",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.0"
+  }
+}

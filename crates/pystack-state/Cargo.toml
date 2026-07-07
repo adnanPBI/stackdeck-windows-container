@@ -1,0 +1,15 @@
+[package]
+name = "pystack-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SQLite state management for PyStack Runner"
+
+[dependencies]
+pystack-types = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = "0.4"

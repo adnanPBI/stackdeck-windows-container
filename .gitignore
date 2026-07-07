@@ -1,0 +1,38 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+
+# Node / Tauri
+/desktop/stackdeck/node_modules/
+/desktop/stackdeck/dist/
+/desktop/stackdeck/src-tauri/target/
+/desktop/stackdeck/src-tauri/bin/*.exe
+
+# Generated artifacts
+*.exe
+*.dll
+*.pdb
+*.log
+*.tmp
+*.partial
+*.zip
+*.msi
+*.msix
+*.appx
+
+# Runtime state
+.pystack/
+.pystack-*/
+diagnostics*/
+*.redacted.log
+
+# Agent/session artifacts
+LAST_RESPONSE.txt
+MEMORY.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

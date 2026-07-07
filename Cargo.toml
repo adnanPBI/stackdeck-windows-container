@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pystack-types",
+    "crates/pystack-compose",
+    "crates/pystack-state",
+    "crates/pystack-process",
+    "crates/pystack-hyperv",
+    "crates/pystack-api",
+    "crates/pystack-gui",
+    "crates/pystack-desktop",
+    "crates/pystack-cli",
+    "desktop/stackdeck/src-tauri",
+]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# HTTP
+axum = "0.8"
+reqwest = { version = "0.12", features = ["json"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Regex
+regex = "1"
+
+# Templates
+askama = "0.12"
+eframe = "0.27"
+tauri = "=2.5.1"
+tauri-build = "=2.2.0"
+
+# Cryptography / security
+subtle = "2"
+sha2 = "0.10"
+rand = "0.8"
+
+# Internal crates
+pystack-types = { path = "crates/pystack-types" }
+pystack-compose = { path = "crates/pystack-compose" }
+pystack-state = { path = "crates/pystack-state" }
+pystack-process = { path = "crates/pystack-process" }
+pystack-hyperv = { path = "crates/pystack-hyperv" }
+pystack-api = { path = "crates/pystack-api" }
+pystack-gui = { path = "crates/pystack-gui" }
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1

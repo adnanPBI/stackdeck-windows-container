@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "StackDeck",
+  "version": "0.5.0",
+  "identifier": "com.stackdeck.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "StackDeck",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1040,
+        "minHeight": 680
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "publisher": "StackDeck",
+    "category": "DeveloperTool",
+    "shortDescription": "Offline desktop control plane for local StackDeck stacks.",
+    "longDescription": "StackDeck packages a React/Vite UI, Tauri shell, and stackdeck-hive.exe command backend for offline Windows stack management.",
+    "icon": ["icons/icon.ico"],
+    "externalBin": ["bin/stackdeck-hive"],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
+  }
+}
