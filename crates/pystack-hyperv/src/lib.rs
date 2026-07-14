@@ -1769,6 +1769,13 @@ if ($mac) {{
             },
         );
 
+        let hyperv_feature = self.ps(
+            "(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction Stop).State",
+            false,
+            Some(30),
+        ).unwrap_or_else(|err| format!("unknown: {err}"));
+        result.insert("hyperv_feature".into(), hyperv_feature);
+
         let ssh_check = self.run_cmd(&["where.exe".to_string(), "ssh".to_string()], false, None);
         result.insert(
             "ssh".into(),
@@ -1788,6 +1795,63 @@ if ($mac) {{
                 "missing".into()
             },
         );
+
+        let ssh_keygen_check = self.run_cmd(
+            &["where.exe".to_string(), "ssh-keygen".to_string()],
+            false,
+            None,
+        );
+        result.insert(
+            "ssh-keygen".into(),
+            if ssh_keygen_check.is_ok() {
+                "available".into()
+            } else {
+                "missing".into()
+            },
+        );
+
+        let iso_tool = self
+            .ps(
+                "$tool = Get-Command oscdimg.exe -ErrorAction SilentlyContinue; if (-not $tool) { $tool = Get-Command genisoimage.exe -ErrorAction SilentlyContinue }; if ($tool) { $tool.Source } else { 'imapi2-fallback' }",
+                false,
+                Some(30),
+            )
+            .unwrap_or_else(|err| format!("unknown: {err}"));
+        result.insert("seed_iso_tool".into(), iso_tool);
+
+        let qemu_img = self
+            .ps(
+                "$tool = Get-Command qemu-img.exe -ErrorAction SilentlyContinue; if (-not $tool) { $tool = Get-Command qemu-img -ErrorAction SilentlyContinue }; if ($tool) { $tool.Source } else { 'missing; provide pre-converted .vhdx or install qemu-img' }",
+                false,
+                Some(30),
+            )
+            .unwrap_or_else(|err| format!("unknown: {err}"));
+        result.insert("qemu_img".into(), qemu_img);
+
+        let vm_root = PathBuf::from(&self.config.vm_root);
+        let vm_root_parent = vm_root.parent().unwrap_or(&vm_root);
+        result.insert("vm_root".into(), self.config.vm_root.clone());
+        result.insert(
+            "vm_root_parent_exists".into(),
+            vm_root_parent.exists().to_string(),
+        );
+        let vm_root_drive = vm_root
+            .components()
+            .next()
+            .map(|component| component.as_os_str().to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !vm_root_drive.is_empty() {
+            let drive = vm_root_drive.trim_end_matches('\\').to_string();
+            let free = self.ps(
+                &format!(
+                    "$d = Get-PSDrive -Name '{}' -ErrorAction SilentlyContinue; if ($d) {{ [math]::Round($d.Free / 1GB, 2) }} else {{ 'unknown' }}",
+                    ps_quote(drive.trim_end_matches(':'))
+                ),
+                false,
+                Some(30),
+            ).unwrap_or_else(|err| format!("unknown: {err}"));
+            result.insert("vm_root_free_gb".into(), free);
+        }
 
         result.insert("vm_name".into(), self.config.vm_name.clone());
         result.insert(

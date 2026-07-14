@@ -161,6 +161,110 @@ async fn clear_project_volumes(
 }
 
 #[tauri::command]
+async fn runtime_action(
+    area: String,
+    action: String,
+    target: Option<String>,
+    value: Option<String>,
+    confirmation: Option<String>,
+) -> Result<CommandResult, String> {
+    let mut args = Vec::new();
+    let timeout = match area.as_str() {
+        "vm" => Duration::from_secs(240),
+        "diagnostics" => Duration::from_secs(180),
+        _ => Duration::from_secs(120),
+    };
+
+    match (area.as_str(), action.as_str()) {
+        ("image", "pull") => {
+            let image = required_value(value, "Image name is required.")?;
+            args.extend(["pull".to_string(), image]);
+        }
+        ("image", "remove") => {
+            require_confirmation(confirmation, "REMOVE_IMAGE")?;
+            let image = required_value(target, "Image name is required.")?;
+            args.extend(["rmi".to_string(), "--force".to_string(), image]);
+        }
+        ("image", "prune") => {
+            require_confirmation(confirmation, "PRUNE_IMAGES")?;
+            args.extend([
+                "hyperv".to_string(),
+                "image".to_string(),
+                "prune".to_string(),
+            ]);
+        }
+        ("volume", "create") => {
+            let name = required_value(value, "Volume name is required.")?;
+            args.extend(["volume".to_string(), "create".to_string(), name]);
+        }
+        ("volume", "remove") => {
+            require_confirmation(confirmation, "REMOVE_VOLUME")?;
+            let name = required_value(target, "Volume name is required.")?;
+            args.extend([
+                "volume".to_string(),
+                "rm".to_string(),
+                "--force".to_string(),
+                name,
+            ]);
+        }
+        ("volume", "prune") => {
+            require_confirmation(confirmation, "PRUNE_VOLUMES")?;
+            args.extend(["volume".to_string(), "prune".to_string()]);
+        }
+        ("network", "create") => {
+            let name = required_value(value, "Network name is required.")?;
+            args.extend(["network".to_string(), "create".to_string(), name]);
+        }
+        ("network", "remove") => {
+            require_confirmation(confirmation, "REMOVE_NETWORK")?;
+            let name = required_value(target, "Network name is required.")?;
+            args.extend(["network".to_string(), "rm".to_string(), name]);
+        }
+        ("vm", "start") => args.extend(["hyperv".to_string(), "start-vm".to_string()]),
+        ("vm", "stop") => {
+            require_confirmation(confirmation, "STOP_VM")?;
+            args.extend(["hyperv".to_string(), "stop-vm".to_string()]);
+        }
+        ("vm", "repair") => args.extend(["hyperv".to_string(), "repair".to_string()]),
+        ("vm", "doctor") => args.extend(["hyperv".to_string(), "doctor".to_string()]),
+        ("diagnostics", "write") => {
+            args.extend(["diagnostics".to_string(), "--text".to_string()]);
+        }
+        _ => return Err(format!("Unsupported runtime action: {area}/{action}")),
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let exe =
+            find_hive_exe().ok_or_else(|| "Could not locate stackdeck-hive.exe.".to_string())?;
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let output = run_command_with_timeout(exe, cwd, args, timeout)?;
+        Ok(CommandResult {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: bounded_output(&output.stdout),
+            stderr: bounded_output(&output.stderr),
+            timed_out: output.timed_out,
+        })
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+fn required_value(value: Option<String>, message: &str) -> Result<String, String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| message.to_string())
+}
+
+fn require_confirmation(value: Option<String>, expected: &str) -> Result<(), String> {
+    if value.as_deref() == Some(expected) {
+        Ok(())
+    } else {
+        Err("Action requires backend confirmation.".to_string())
+    }
+}
+
+#[tauri::command]
 fn hyperv_health() -> RuntimeOverview {
     collect_hyperv_overview()
 }
@@ -995,6 +1099,7 @@ fn main() {
             list_services,
             service_action,
             clear_project_volumes,
+            runtime_action,
             unregister_project,
             hyperv_health,
             open_service_url,

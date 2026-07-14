@@ -125,8 +125,26 @@ struct ImageCreateQuery {
     from_image: String,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct ImageSearchQuery {
+    #[serde(default)]
+    term: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ImageTagQuery {
+    #[serde(default)]
+    repo: String,
+    #[serde(default = "default_latest_tag")]
+    tag: String,
+}
+
 fn default_tail() -> u32 {
     100
+}
+
+fn default_latest_tag() -> String {
+    "latest".to_string()
 }
 
 pub async fn serve(host: &str, port: u16, allow_remote: bool) -> Result<(), ApiError> {
@@ -158,6 +176,12 @@ pub fn app() -> Router {
         .route("/v{version}/_ping", get(ping))
         .route("/version", get(version))
         .route("/v{version}/version", get(version))
+        .route("/info", get(info))
+        .route("/v{version}/info", get(info))
+        .route("/system/df", get(system_df))
+        .route("/v{version}/system/df", get(system_df))
+        .route("/auth", post(auth_check))
+        .route("/v{version}/auth", post(auth_check))
         .route("/containers/json", get(containers_json))
         .route("/v{version}/containers/json", get(containers_json))
         .route("/containers/create", post(containers_create))
@@ -170,16 +194,39 @@ pub fn app() -> Router {
         .route("/v{version}/containers/{id}/start", post(container_start))
         .route("/containers/{id}/stop", post(container_stop))
         .route("/v{version}/containers/{id}/stop", post(container_stop))
+        .route("/containers/{id}/restart", post(container_restart))
+        .route(
+            "/v{version}/containers/{id}/restart",
+            post(container_restart),
+        )
+        .route("/containers/{id}/kill", post(container_kill))
+        .route("/v{version}/containers/{id}/kill", post(container_kill))
+        .route("/containers/{id}/wait", post(container_wait))
+        .route("/v{version}/containers/{id}/wait", post(container_wait))
+        .route("/containers/{id}/pause", post(container_pause))
+        .route("/v{version}/containers/{id}/pause", post(container_pause))
+        .route("/containers/{id}/unpause", post(container_unpause))
+        .route(
+            "/v{version}/containers/{id}/unpause",
+            post(container_unpause),
+        )
         .route("/containers/{id}", delete(container_remove))
         .route("/v{version}/containers/{id}", delete(container_remove))
         .route("/images/json", get(images_json))
         .route("/v{version}/images/json", get(images_json))
         .route("/images/create", post(image_create))
         .route("/v{version}/images/create", post(image_create))
-        .route("/images/{*name}", get(image_inspect).delete(image_remove))
+        .route("/images/search", get(images_search))
+        .route("/v{version}/images/search", get(images_search))
+        .route("/build", post(build_not_supported))
+        .route("/v{version}/build", post(build_not_supported))
+        .route(
+            "/images/{*name}",
+            get(image_get).post(image_post).delete(image_remove),
+        )
         .route(
             "/v{version}/images/{*name}",
-            get(image_inspect).delete(image_remove),
+            get(image_get).post(image_post).delete(image_remove),
         )
         .route("/networks", get(networks_json))
         .route("/v{version}/networks", get(networks_json))
@@ -251,6 +298,18 @@ fn version_payload() -> Value {
     })
 }
 
+async fn info() -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(blocking(info_payload).await?))
+}
+
+async fn system_df() -> Result<impl IntoResponse, ApiError> {
+    Ok(Json(blocking(system_df_payload).await?))
+}
+
+async fn auth_check() -> impl IntoResponse {
+    Json(json!({ "Status": "Login Succeeded", "IdentityToken": "" }))
+}
+
 async fn containers_json(
     Query(query): Query<ContainerListQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -300,6 +359,49 @@ async fn container_stop(
     Ok(empty_response(StatusCode::NO_CONTENT))
 }
 
+async fn container_restart(
+    Path(params): Path<HashMap<String, String>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = path_param(&params, "id")?;
+    blocking(move || {
+        stop_container(&id)?;
+        start_container(&id)
+    })
+    .await?;
+    Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
+async fn container_kill(
+    Path(params): Path<HashMap<String, String>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = path_param(&params, "id")?;
+    blocking(move || container_signal(&id, "kill")).await?;
+    Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
+async fn container_wait(
+    Path(params): Path<HashMap<String, String>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = path_param(&params, "id")?;
+    Ok(Json(blocking(move || wait_container(&id)).await?))
+}
+
+async fn container_pause(
+    Path(params): Path<HashMap<String, String>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = path_param(&params, "id")?;
+    blocking(move || container_signal(&id, "pause")).await?;
+    Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
+async fn container_unpause(
+    Path(params): Path<HashMap<String, String>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let id = path_param(&params, "id")?;
+    blocking(move || container_signal(&id, "unpause")).await?;
+    Ok(empty_response(StatusCode::NO_CONTENT))
+}
+
 async fn container_remove(
     Path(params): Path<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -319,11 +421,41 @@ async fn image_create(
     Ok(Json(blocking(move || pull_image(&name)).await?))
 }
 
-async fn image_inspect(
-    Path(params): Path<HashMap<String, String>>,
+async fn images_search(
+    Query(query): Query<ImageSearchQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let name = docker_image_json_name(&path_param(&params, "name")?)?;
-    Ok(Json(blocking(move || inspect_image(&name)).await?))
+    let term = query.term;
+    Ok(Json(blocking(move || search_images(&term)).await?))
+}
+
+async fn image_get(
+    Path(params): Path<HashMap<String, String>>,
+) -> Result<axum::response::Response, ApiError> {
+    let name = path_param(&params, "name")?;
+    if let Some(image) = docker_image_history_name(&name) {
+        return Ok(Json(blocking(move || image_history_payload(&image)).await?).into_response());
+    }
+    let name = docker_image_json_name(&name)?;
+    Ok(Json(blocking(move || inspect_image(&name)).await?).into_response())
+}
+
+async fn image_post(
+    Path(params): Path<HashMap<String, String>>,
+    Query(query): Query<ImageTagQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let name = path_param(&params, "name")?;
+    let Some(image) = docker_image_tag_name(&name) else {
+        return Err(ApiError::NotFound("unsupported image endpoint".to_string()));
+    };
+    blocking(move || tag_image(&image, &query.repo, &query.tag)).await?;
+    Ok(empty_response(StatusCode::CREATED))
+}
+
+async fn build_not_supported() -> Result<Json<Value>, ApiError> {
+    Err(ApiError::BadRequest(
+        "Docker API build streaming is not implemented yet; use stackdeck build or stackdeck compose build"
+            .to_string(),
+    ))
 }
 
 async fn image_remove(
@@ -429,6 +561,18 @@ fn docker_image_json_name(name: &str) -> Result<String, ApiError> {
         .map(|name| name.trim_matches('/').to_string())
         .filter(|name| !name.is_empty())
         .ok_or_else(|| ApiError::NotFound("unsupported image endpoint".to_string()))
+}
+
+fn docker_image_history_name(name: &str) -> Option<String> {
+    name.strip_suffix("/history")
+        .map(|name| name.trim_matches('/').to_string())
+        .filter(|name| !name.is_empty())
+}
+
+fn docker_image_tag_name(name: &str) -> Option<String> {
+    name.strip_suffix("/tag")
+        .map(|name| name.trim_matches('/').to_string())
+        .filter(|name| !name.is_empty())
 }
 
 fn state_file() -> PathBuf {
@@ -1214,6 +1358,87 @@ fn summary_ports(ports: Option<&Value>) -> Value {
     Value::Array(result)
 }
 
+fn info_payload() -> Result<Value, ApiError> {
+    let version = version_payload();
+    let health = manager()
+        .and_then(|mgr| mgr.runtime_health_check().map_err(ApiError::from))
+        .unwrap_or_default();
+    let containers = list_containers(true).unwrap_or_default();
+    let images = list_images().unwrap_or_default();
+    Ok(json!({
+        "ID": "stackdeck-local",
+        "Containers": containers.len(),
+        "ContainersRunning": containers.iter().filter(|item| item.get("State").and_then(|v| v.as_str()) == Some("running")).count(),
+        "ContainersPaused": 0,
+        "ContainersStopped": containers.iter().filter(|item| item.get("State").and_then(|v| v.as_str()) != Some("running")).count(),
+        "Images": images.len(),
+        "Driver": "containerd",
+        "DriverStatus": [["Runtime", "Hyper-V VM + containerd + nerdctl"]],
+        "Plugins": { "Volume": ["local"], "Network": ["bridge"], "Authorization": null, "Log": ["json-file"] },
+        "MemoryLimit": true,
+        "SwapLimit": false,
+        "CpuCfsPeriod": true,
+        "CpuCfsQuota": true,
+        "IPv4Forwarding": true,
+        "Debug": false,
+        "NFd": 0,
+        "NGoroutines": 0,
+        "SystemTime": chrono::Utc::now().to_rfc3339(),
+        "LoggingDriver": "json-file",
+        "CgroupDriver": "systemd",
+        "NEventsListener": 0,
+        "KernelVersion": health.get("kernel").cloned().unwrap_or_else(|| json!("")),
+        "OperatingSystem": "StackDeck Hyper-V Linux runtime",
+        "OSType": "linux",
+        "Architecture": version["Arch"],
+        "ServerVersion": version["Version"],
+        "Runtimes": { "io.containerd.runc.v2": { "path": "runc" } },
+        "DefaultRuntime": "io.containerd.runc.v2",
+        "Swarm": { "LocalNodeState": "inactive" },
+        "LiveRestoreEnabled": false,
+        "Isolation": "",
+        "ProductLicense": "Community Engine",
+        "Warnings": [],
+    }))
+}
+
+fn system_df_payload() -> Result<Value, ApiError> {
+    Ok(json!({
+        "LayersSize": list_images().unwrap_or_default().iter().filter_map(|item| item.get("Size").and_then(|v| v.as_u64())).sum::<u64>(),
+        "Images": list_images().unwrap_or_default(),
+        "Containers": list_containers(true).unwrap_or_default(),
+        "Volumes": list_volumes().unwrap_or_else(|_| json!({"Volumes": []}))["Volumes"].clone(),
+        "BuildCache": [],
+    }))
+}
+
+fn container_signal(identifier: &str, command: &str) -> Result<(), ApiError> {
+    let mgr = manager()?;
+    mgr.ssh(
+        &pystack_hyperv::nerdctl_command(mgr.config(), &[command, &container_ref(identifier)]),
+        false,
+    )?;
+    Ok(())
+}
+
+fn wait_container(identifier: &str) -> Result<Value, ApiError> {
+    if let Some((_id, meta)) = state_match(identifier) {
+        if meta.runtime_id.is_none() {
+            return Ok(json!({ "StatusCode": 0, "Error": null }));
+        }
+    }
+    let mgr = manager()?;
+    let reference = container_ref(identifier);
+    let cmd = format!(
+        "{} >/dev/null 2>&1; code=$( {} 2>/dev/null | sed -n 's/.*\"ExitCode\":[[:space:]]*\\([0-9-]*\\).*/\\1/p' | head -n 1 ); echo ${{code:-0}}",
+        pystack_hyperv::nerdctl_command(mgr.config(), &["wait", &reference]),
+        pystack_hyperv::nerdctl_command(mgr.config(), &["inspect", &reference])
+    );
+    let raw = mgr.ssh(&cmd, false)?;
+    let code = raw.trim().parse::<i64>().unwrap_or(0);
+    Ok(json!({ "StatusCode": code, "Error": null }))
+}
+
 fn list_networks() -> Result<Vec<Value>, ApiError> {
     let mgr = manager()?;
     let raw = mgr.ssh(
@@ -1379,6 +1604,77 @@ fn pull_image(name: &str) -> Result<Value, ApiError> {
         true,
     )?;
     Ok(json!({ "status": "pulled", "id": name, "output": output }))
+}
+
+fn search_images(term: &str) -> Result<Vec<Value>, ApiError> {
+    if term.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mgr = manager()?;
+    let raw = mgr.ssh(
+        &pystack_hyperv::nerdctl_command(mgr.config(), &["search", term]),
+        false,
+    )?;
+    Ok(raw
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| !name.is_empty())
+        .take(25)
+        .map(|name| {
+            json!({
+                "name": name,
+                "description": "",
+                "star_count": 0,
+                "is_official": name.split('/').count() == 1,
+                "is_automated": false,
+            })
+        })
+        .collect())
+}
+
+fn tag_image(name: &str, repo: &str, tag: &str) -> Result<(), ApiError> {
+    if repo.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "repo query parameter is required".into(),
+        ));
+    }
+    let target = if repo.contains(':') {
+        repo.to_string()
+    } else {
+        format!("{}:{}", repo, tag)
+    };
+    let mgr = manager()?;
+    mgr.ssh(
+        &pystack_hyperv::nerdctl_command(mgr.config(), &["tag", name, &target]),
+        true,
+    )?;
+    Ok(())
+}
+
+fn image_history_payload(name: &str) -> Result<Vec<Value>, ApiError> {
+    let mgr = manager()?;
+    let raw = mgr.ssh(
+        &pystack_hyperv::nerdctl_command(
+            mgr.config(),
+            &["image", "history", "--format", "{{json .}}", name],
+        ),
+        false,
+    )?;
+    Ok(raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .map(|row| {
+            json!({
+                "Id": row.get("ID").or_else(|| row.get("Id")).and_then(|v| v.as_str()).unwrap_or_default(),
+                "Created": 0,
+                "CreatedBy": row.get("CreatedBy").or_else(|| row.get("Created Since")).and_then(|v| v.as_str()).unwrap_or_default(),
+                "Tags": [],
+                "Size": parse_size(row.get("Size").and_then(|v| v.as_str()).unwrap_or_default()),
+                "Comment": "",
+            })
+        })
+        .collect())
 }
 
 fn inspect_image(name: &str) -> Result<Value, ApiError> {
@@ -1565,6 +1861,14 @@ mod tests {
             "ghcr.io/org/app:tag"
         );
         assert!(docker_image_json_name("search").is_err());
+        assert_eq!(
+            docker_image_history_name("ghcr.io/org/app:tag/history").unwrap(),
+            "ghcr.io/org/app:tag"
+        );
+        assert_eq!(
+            docker_image_tag_name("ghcr.io/org/app:tag/tag").unwrap(),
+            "ghcr.io/org/app:tag"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1598,7 +1902,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn unsupported_image_get_does_not_reach_backend() {
+    async fn image_search_without_term_does_not_reach_backend() {
         let _home = isolated_home();
         let response = app()
             .oneshot(
@@ -1610,7 +1914,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body.as_array().unwrap().len(), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -91,6 +91,85 @@ enum Commands {
         tail: u32,
     },
 
+    /// Docker-like container list (`docker ps`)
+    Ps {
+        #[arg(short = 'a', long)]
+        all: bool,
+    },
+
+    /// Docker-like image list (`docker images`)
+    Images {
+        #[arg(short = 'a', long)]
+        all: bool,
+    },
+
+    /// Docker-like image pull (`docker pull`)
+    Pull { image: String },
+
+    /// Docker-like image removal (`docker rmi`)
+    Rmi {
+        #[arg(short = 'f', long)]
+        force: bool,
+        images: Vec<String>,
+    },
+
+    /// Docker-like image build (`docker build`)
+    Build {
+        #[arg(short = 't', long = "tag")]
+        tag: Vec<String>,
+        #[arg(short = 'f', long, default_value = "Dockerfile")]
+        file: String,
+        #[arg(long = "build-arg")]
+        build_arg: Vec<String>,
+        #[arg(default_value = ".")]
+        context: String,
+    },
+
+    /// Docker-like registry login (`docker login`)
+    Login {
+        #[arg(default_value = "docker.io")]
+        registry: String,
+        #[arg(short = 'u', long)]
+        username: String,
+        #[arg(short = 'p', long)]
+        password: String,
+    },
+
+    /// Docker-like container inspect
+    Inspect { containers: Vec<String> },
+
+    /// Docker-like container exec
+    Exec {
+        container: String,
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
+    },
+
+    /// Docker-like container start
+    Start { containers: Vec<String> },
+
+    /// Docker-like container stop
+    Stop { containers: Vec<String> },
+
+    /// Docker-like container removal
+    Rm {
+        #[arg(short = 'f', long)]
+        force: bool,
+        containers: Vec<String>,
+    },
+
+    /// Docker-like volume commands
+    Volume {
+        #[command(subcommand)]
+        volume_cmd: VolumeCommands,
+    },
+
+    /// Docker-like network commands
+    Network {
+        #[command(subcommand)]
+        network_cmd: NetworkCommands,
+    },
+
     /// Write a redacted diagnostics bundle
     Diagnostics {
         #[arg(long, default_value = "")]
@@ -1172,6 +1251,30 @@ async fn main() -> Result<()> {
         Commands::Restart { services } => cmd_restart(&cli.config, &cli.backend, &services)?,
         Commands::Status { json } => cmd_status(&cli.config, &cli.backend, json)?,
         Commands::Logs { service, tail } => cmd_logs(&cli.config, &cli.backend, &service, tail)?,
+        Commands::Ps { all } => cmd_docker_ps(all)?,
+        Commands::Images { all } => cmd_docker_images(all)?,
+        Commands::Pull { image } => cmd_docker_pull(&image)?,
+        Commands::Rmi { force, images } => cmd_docker_rmi(force, &images)?,
+        Commands::Build {
+            tag,
+            file,
+            build_arg,
+            context,
+        } => cmd_docker_build(&tag, &file, &build_arg, &context)?,
+        Commands::Login {
+            registry,
+            username,
+            password,
+        } => cmd_docker_login(&registry, &username, &password)?,
+        Commands::Inspect { containers } => cmd_docker_inspect(&containers)?,
+        Commands::Exec { container, command } => cmd_docker_exec(&container, &command)?,
+        Commands::Start { containers } => {
+            cmd_docker_container_command("start", false, &containers)?
+        }
+        Commands::Stop { containers } => cmd_docker_container_command("stop", false, &containers)?,
+        Commands::Rm { force, containers } => cmd_docker_rm(force, &containers)?,
+        Commands::Volume { volume_cmd } => cmd_docker_volume(volume_cmd)?,
+        Commands::Network { network_cmd } => cmd_docker_network(network_cmd)?,
         Commands::Diagnostics { output, tail, text } => {
             cmd_diagnostics(&cli.config, &output, tail, text)?
         }
@@ -2225,6 +2328,217 @@ fn cmd_compose_logs(file: &str, backend: &str, service: &str, tail: u32) -> Resu
         anyhow::bail!("Service '{}' not found in compose file", service);
     }
     run_stack_logs(stack, backend, service, tail)
+}
+
+// ---------------------------------------------------------------------------
+// Docker-like top-level command aliases
+// ---------------------------------------------------------------------------
+
+fn hyperv_manager() -> Result<pystack_hyperv::HyperVManager> {
+    Ok(pystack_hyperv::HyperVManager::new(
+        pystack_hyperv::HyperVManager::load_config()?,
+    ))
+}
+
+fn cmd_docker_ps(all: bool) -> Result<()> {
+    let mgr = hyperv_manager()?;
+    if all {
+        println!("{}", mgr.container_ps()?);
+    } else {
+        println!(
+            "{}",
+            mgr.ssh(
+                &pystack_hyperv::nerdctl_command(mgr.config(), &["ps"]),
+                false,
+            )?
+        );
+    }
+    Ok(())
+}
+
+fn cmd_docker_images(all: bool) -> Result<()> {
+    println!("{}", hyperv_manager()?.image_list(all)?);
+    Ok(())
+}
+
+fn cmd_docker_pull(image: &str) -> Result<()> {
+    let mgr = hyperv_manager()?;
+    mgr.ssh_stream(
+        &pystack_hyperv::nerdctl_command(mgr.config(), &["pull", image]),
+        true,
+    )?;
+    Ok(())
+}
+
+fn cmd_docker_rmi(force: bool, images: &[String]) -> Result<()> {
+    if images.is_empty() {
+        anyhow::bail!("at least one image is required");
+    }
+    let mgr = hyperv_manager()?;
+    println!(
+        "{}",
+        mgr.image_remove(
+            &images.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            force
+        )?
+    );
+    Ok(())
+}
+
+fn cmd_docker_build(
+    tags: &[String],
+    dockerfile: &str,
+    build_args: &[String],
+    context: &str,
+) -> Result<()> {
+    if tags.is_empty() {
+        anyhow::bail!("docker-like build requires at least one -t/--tag value");
+    }
+    let root = std::fs::canonicalize(context).unwrap_or_else(|_| PathBuf::from(context));
+    let args_map: HashMap<String, String> = build_args
+        .iter()
+        .filter_map(|item| item.split_once('='))
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    let build = serde_json::json!({
+        "context": ".",
+        "dockerfile": dockerfile,
+        "args": args_map,
+    });
+    let svc = pystack_types::HyperVService {
+        project: "docker-build".to_string(),
+        name: "image".to_string(),
+        root,
+        image: tags[0].clone(),
+        build: Some(build),
+        command: None,
+        env: HashMap::new(),
+        ports: Vec::new(),
+        volumes: Vec::new(),
+        networks: Vec::new(),
+        restart: "no".to_string(),
+        secrets: Vec::new(),
+        configs: Vec::new(),
+        secret_resources: HashMap::new(),
+        config_resources: HashMap::new(),
+        healthcheck: None,
+    };
+    let mgr = hyperv_manager()?;
+    mgr.build_image(&svc, &tags[0])?;
+    for extra in tags.iter().skip(1) {
+        mgr.ssh(
+            &pystack_hyperv::nerdctl_command(mgr.config(), &["tag", &tags[0], extra]),
+            true,
+        )?;
+    }
+    Ok(())
+}
+
+fn cmd_docker_login(registry: &str, username: &str, password: &str) -> Result<()> {
+    println!(
+        "{}",
+        hyperv_manager()?.image_login(registry, username, password)?
+    );
+    Ok(())
+}
+
+fn cmd_docker_inspect(containers: &[String]) -> Result<()> {
+    if containers.is_empty() {
+        anyhow::bail!("at least one container is required");
+    }
+    let mgr = hyperv_manager()?;
+    let refs = containers.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&mgr.inspect_containers(&refs)?)?
+    );
+    Ok(())
+}
+
+fn cmd_docker_exec(container: &str, command: &[String]) -> Result<()> {
+    if command.is_empty() {
+        anyhow::bail!("exec requires a command");
+    }
+    println!(
+        "{}",
+        hyperv_manager()?.exec_container(
+            container,
+            &command.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        )?
+    );
+    Ok(())
+}
+
+fn cmd_docker_container_command(command: &str, check: bool, containers: &[String]) -> Result<()> {
+    if containers.is_empty() {
+        anyhow::bail!("at least one container is required");
+    }
+    let mgr = hyperv_manager()?;
+    for container in containers {
+        println!(
+            "{}",
+            mgr.ssh(
+                &pystack_hyperv::nerdctl_command(mgr.config(), &[command, container]),
+                check,
+            )?
+        );
+    }
+    Ok(())
+}
+
+fn cmd_docker_rm(force: bool, containers: &[String]) -> Result<()> {
+    if containers.is_empty() {
+        anyhow::bail!("at least one container is required");
+    }
+    let mgr = hyperv_manager()?;
+    let mut args = vec!["rm".to_string()];
+    if force {
+        args.push("-f".to_string());
+    }
+    args.extend(containers.iter().cloned());
+    println!(
+        "{}",
+        mgr.ssh(&pystack_hyperv::nerdctl_command(mgr.config(), &args), false)?
+    );
+    Ok(())
+}
+
+fn cmd_docker_volume(cmd: VolumeCommands) -> Result<()> {
+    let mgr = hyperv_manager()?;
+    match cmd {
+        VolumeCommands::Ls => println!("{}", mgr.volume_list()?),
+        VolumeCommands::Create { name, .. } => println!("{}", mgr.volume_create(&name)?),
+        VolumeCommands::Rm { force, volumes } => println!(
+            "{}",
+            mgr.volume_remove(
+                &volumes.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                force
+            )?
+        ),
+        VolumeCommands::Prune => println!("{}", mgr.volume_prune()?),
+        VolumeCommands::Inspect { volumes } => println!(
+            "{}",
+            mgr.volume_inspect(&volumes.iter().map(|s| s.as_str()).collect::<Vec<_>>())?
+        ),
+    }
+    Ok(())
+}
+
+fn cmd_docker_network(cmd: NetworkCommands) -> Result<()> {
+    let mgr = hyperv_manager()?;
+    match cmd {
+        NetworkCommands::Ls => println!("{}", mgr.network_list()?),
+        NetworkCommands::Create { name, .. } => println!("{}", mgr.network_create(&name)?),
+        NetworkCommands::Rm { networks } => println!(
+            "{}",
+            mgr.network_remove(&networks.iter().map(|s| s.as_str()).collect::<Vec<_>>())?
+        ),
+        NetworkCommands::Inspect { networks } => println!(
+            "{}",
+            mgr.network_inspect(&networks.iter().map(|s| s.as_str()).collect::<Vec<_>>())?
+        ),
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

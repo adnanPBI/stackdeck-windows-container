@@ -705,7 +705,17 @@ function MetaPill({ label, value }: { label: string; value: string }) {
   );
 }
 
-function TextPanel({ title, text, onBack }: { title: string; text: string; onBack?: () => void }) {
+function TextPanel({
+  title,
+  text,
+  onBack,
+  actions,
+}: {
+  title: string;
+  text: string;
+  onBack?: () => void;
+  actions?: React.ReactNode;
+}) {
   const isLoaded = Boolean(text);
   return (
     <section className="text-panel">
@@ -719,12 +729,137 @@ function TextPanel({ title, text, onBack }: { title: string; text: string; onBac
           )}
           <h2>{title}</h2>
         </div>
-        <span className={`panel-status-badge${isLoaded ? " loaded" : ""}`}>
-          {isLoaded ? "Loaded" : "Empty"}
-        </span>
+        <div className="panel-actions">
+          {actions}
+          <span className={`panel-status-badge${isLoaded ? " loaded" : ""}`}>
+            {isLoaded ? "Loaded" : "Empty"}
+          </span>
+        </div>
       </div>
       <pre>{text || "No data loaded."}</pre>
     </section>
+  );
+}
+
+function ResourceActions({
+  kind,
+  pendingAction,
+  onRuntimeAction,
+}: {
+  kind: "image" | "volume" | "network" | "vm" | "diagnostics";
+  pendingAction: string;
+  onRuntimeAction: (
+    area: string,
+    action: string,
+    options?: { target?: string; value?: string; confirmation?: string },
+  ) => void;
+}) {
+  const busy = Boolean(pendingAction);
+
+  if (kind === "image") {
+    return (
+      <>
+        <button className="btn-panel" disabled={busy} onClick={() => {
+          const image = window.prompt("Image to pull", "alpine:latest");
+          if (image) onRuntimeAction("image", "pull", { value: image });
+        }} type="button">
+          <IconPlay size={12} /> Pull
+        </button>
+        <button className="btn-panel danger" disabled={busy} onClick={() => {
+          const image = window.prompt("Image to remove");
+          if (image && window.confirm(`Remove image ${image}?`)) {
+            onRuntimeAction("image", "remove", { target: image, confirmation: "REMOVE_IMAGE" });
+          }
+        }} type="button">
+          <IconTrash size={12} /> Remove
+        </button>
+        <button className="btn-panel danger" disabled={busy} onClick={() => {
+          if (window.confirm("Prune unused images?")) {
+            onRuntimeAction("image", "prune", { confirmation: "PRUNE_IMAGES" });
+          }
+        }} type="button">
+          <IconTrash size={12} /> Prune
+        </button>
+      </>
+    );
+  }
+
+  if (kind === "volume") {
+    return (
+      <>
+        <button className="btn-panel" disabled={busy} onClick={() => {
+          const name = window.prompt("Volume name");
+          if (name) onRuntimeAction("volume", "create", { value: name });
+        }} type="button">
+          <IconPlay size={12} /> Create
+        </button>
+        <button className="btn-panel danger" disabled={busy} onClick={() => {
+          const name = window.prompt("Volume to remove");
+          if (name && window.confirm(`Remove volume ${name}?`)) {
+            onRuntimeAction("volume", "remove", { target: name, confirmation: "REMOVE_VOLUME" });
+          }
+        }} type="button">
+          <IconTrash size={12} /> Remove
+        </button>
+        <button className="btn-panel danger" disabled={busy} onClick={() => {
+          if (window.confirm("Prune unused volumes?")) {
+            onRuntimeAction("volume", "prune", { confirmation: "PRUNE_VOLUMES" });
+          }
+        }} type="button">
+          <IconTrash size={12} /> Prune
+        </button>
+      </>
+    );
+  }
+
+  if (kind === "network") {
+    return (
+      <>
+        <button className="btn-panel" disabled={busy} onClick={() => {
+          const name = window.prompt("Network name");
+          if (name) onRuntimeAction("network", "create", { value: name });
+        }} type="button">
+          <IconPlay size={12} /> Create
+        </button>
+        <button className="btn-panel danger" disabled={busy} onClick={() => {
+          const name = window.prompt("Network to remove");
+          if (name && window.confirm(`Remove network ${name}?`)) {
+            onRuntimeAction("network", "remove", { target: name, confirmation: "REMOVE_NETWORK" });
+          }
+        }} type="button">
+          <IconTrash size={12} /> Remove
+        </button>
+      </>
+    );
+  }
+
+  if (kind === "vm") {
+    return (
+      <>
+        <button className="btn-panel" disabled={busy} onClick={() => onRuntimeAction("vm", "start")} type="button">
+          <IconPlay size={12} /> Start
+        </button>
+        <button className="btn-panel danger" disabled={busy} onClick={() => {
+          if (window.confirm("Stop the StackDeck Hyper-V VM?")) {
+            onRuntimeAction("vm", "stop", { confirmation: "STOP_VM" });
+          }
+        }} type="button">
+          <IconStop size={12} /> Stop
+        </button>
+        <button className="btn-panel" disabled={busy} onClick={() => onRuntimeAction("vm", "repair")} type="button">
+          <IconRotateCw size={12} /> Repair
+        </button>
+        <button className="btn-panel" disabled={busy} onClick={() => onRuntimeAction("vm", "doctor")} type="button">
+          <IconFileText size={12} /> Doctor
+        </button>
+      </>
+    );
+  }
+
+  return (
+    <button className="btn-panel" disabled={busy} onClick={() => onRuntimeAction("diagnostics", "write")} type="button">
+      <IconFileText size={12} /> Write diagnostics
+    </button>
   );
 }
 
@@ -1332,6 +1467,48 @@ function App() {
     }
   }
 
+  async function runRuntimeAction(
+    area: string,
+    action: string,
+    options: { target?: string; value?: string; confirmation?: string } = {},
+  ) {
+    const label = `${area} ${action}`;
+    const actionKey = `runtime:${area}:${action}:${options.target || options.value || "runtime"}`;
+    setPendingAction(actionKey);
+    setStatus(`Running ${label}…`);
+    setLogContext(`${area.toUpperCase()} — ${action}`);
+    setLogs(`command=${label}\ntarget=${options.target || "-"}\nvalue=${options.value || "-"}`);
+
+    try {
+      const result = await invoke<CommandResult>("runtime_action", {
+        area,
+        action,
+        target: options.target,
+        value: options.value,
+        confirmation: options.confirmation,
+      });
+      const output = [
+        `command=${label}`,
+        `exit=${result.exit_code}${result.timed_out ? " timed_out=true" : ""}`,
+        result.stdout && `stdout:\n${result.stdout}`,
+        result.stderr && `stderr:\n${result.stderr}`,
+      ].filter(Boolean).join("\n");
+      setLogs(output || `exit=${result.exit_code}`);
+      setTab("Logs");
+      await loadOverview();
+      await loadServices(selectedProject);
+      setLastUpdated(new Date().toLocaleTimeString());
+      setStatus(result.exit_code === 0 ? `${label} finished` : `${label} failed (exit ${result.exit_code})`);
+    } catch (err) {
+      const msg = formatError(err);
+      setLogs(`command=${label}\nerror:\n${msg}`);
+      setTab("Logs");
+      setStatus(msg);
+    } finally {
+      setPendingAction("");
+    }
+  }
+
   /* ── Render ── */
   return (
     <main className="app-shell" data-density={settings.compactRows ? "compact" : "comfortable"}>
@@ -1484,11 +1661,46 @@ function App() {
             />
           )}
           {tab === "Containers" && <TextPanel title="Containers"    text={overview.containers} onBack={() => setTab("Services")} />}
-          {tab === "Images"     && <TextPanel title="Images"        text={overview.images} onBack={() => setTab("Services")} />}
-          {tab === "Volumes"    && <TextPanel title="Volumes"       text={overview.volumes} onBack={() => setTab("Services")} />}
-          {tab === "Networks"   && <TextPanel title="Networks"      text={overview.networks} onBack={() => setTab("Services")} />}
-          {tab === "VM"         && <TextPanel title="Hyper-V health" text={overview.vm_health} onBack={() => setTab("Services")} />}
-          {tab === "Logs"       && <TextPanel title={logContext || "Command output"} text={logs} onBack={() => setTab("Services")} />}
+          {tab === "Images"     && (
+            <TextPanel
+              title="Images"
+              text={overview.images}
+              onBack={() => setTab("Services")}
+              actions={<ResourceActions kind="image" pendingAction={pendingAction} onRuntimeAction={runRuntimeAction} />}
+            />
+          )}
+          {tab === "Volumes"    && (
+            <TextPanel
+              title="Volumes"
+              text={overview.volumes}
+              onBack={() => setTab("Services")}
+              actions={<ResourceActions kind="volume" pendingAction={pendingAction} onRuntimeAction={runRuntimeAction} />}
+            />
+          )}
+          {tab === "Networks"   && (
+            <TextPanel
+              title="Networks"
+              text={overview.networks}
+              onBack={() => setTab("Services")}
+              actions={<ResourceActions kind="network" pendingAction={pendingAction} onRuntimeAction={runRuntimeAction} />}
+            />
+          )}
+          {tab === "VM"         && (
+            <TextPanel
+              title="Hyper-V health"
+              text={overview.vm_health}
+              onBack={() => setTab("Services")}
+              actions={<ResourceActions kind="vm" pendingAction={pendingAction} onRuntimeAction={runRuntimeAction} />}
+            />
+          )}
+          {tab === "Logs"       && (
+            <TextPanel
+              title={logContext || "Command output"}
+              text={logs}
+              onBack={() => setTab("Services")}
+              actions={<ResourceActions kind="diagnostics" pendingAction={pendingAction} onRuntimeAction={runRuntimeAction} />}
+            />
+          )}
           {tab === "Settings"   && (
             <SettingsView
               settings={settings}

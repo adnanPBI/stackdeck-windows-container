@@ -1132,6 +1132,45 @@ button.endpoint-link::after { display: none; }
   letter-spacing: -0.2px;
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.btn-panel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.btn-panel:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  transform: translateY(-1px);
+}
+
+.btn-panel.danger {
+  color: var(--danger);
+}
+
+.btn-panel.danger:hover:not(:disabled) {
+  background: hsl(0 72% 48% / 0.12);
+  border-color: hsl(0 72% 48% / 0.35);
+}
+
 .panel-status-badge {
   font-size: 11px;
   font-weight: 600;
