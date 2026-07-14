@@ -7,7 +7,7 @@
 [CmdletBinding()]
 param(
   [switch]$EnableFeatures,
-  [string]$VmRoot = "D:\StackDeck\VMs\pystack-linux",
+  [string]$VmRoot = "D:\StackDeck\VMs\stackdeck-linux",
   [string]$ImageRoot = "D:\StackDeck\Images"
 )
 

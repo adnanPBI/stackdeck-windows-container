@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param(
-  [string]$PystackExe = "pystack",
-  [string]$VmName = "pystack-linux",
-  [string]$VmRoot = "D:\StackDeck\VMs\pystack-linux",
+  [string]$PystackExe = "stackdeck",
+  [string]$VmName = "stackdeck-linux",
+  [string]$VmRoot = "D:\StackDeck\VMs\stackdeck-linux",
   [UInt32]$DiskGB = 10,
   [UInt32]$MemoryMB = 4096,
   [UInt32]$Cpus = 2,

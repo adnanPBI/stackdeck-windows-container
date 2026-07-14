@@ -24,6 +24,8 @@ Cargo.lock.bak
 # Runtime state
 .pystack/
 .pystack-*/
+.stackdeck/
+.stackdeck-*/
 diagnostics*/
 *.redacted.log
 

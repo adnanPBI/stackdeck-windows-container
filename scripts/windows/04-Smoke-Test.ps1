@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$PystackExe = "pystack",
+  [string]$PystackExe = "stackdeck",
   [string]$ComposeFile = "examples\smoke\docker-compose.yml",
   [switch]$KeepRunning
 )

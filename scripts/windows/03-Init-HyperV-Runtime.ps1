@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [string]$PystackExe = "pystack",
+  [string]$PystackExe = "stackdeck",
   [string]$ImageUrl = "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
   [Parameter(Mandatory=$true)][string]$Sha256,
   [UInt32]$Timeout = 900

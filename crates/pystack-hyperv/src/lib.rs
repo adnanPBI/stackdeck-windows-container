@@ -1,4 +1,4 @@
-//! Hyper-V backend for PyStack Runner.
+//! Hyper-V backend for StackDeck.
 //!
 //! Replaces `hyperv_backend.py` — VM lifecycle, SSH orchestration,
 //! container management, ISO generation, port proxy, SMB shares.
@@ -516,7 +516,7 @@ if ! sudo systemctl is-active --quiet containerd; then
   echo "containerd failed to start" >&2
   exit 1
 fi
-sudo nerdctl --namespace pystack version >/dev/null
+sudo nerdctl --namespace stackdeck version >/dev/null
 "#;
         self.ssh_stream(script, true)?;
         self.apply_registry_mirrors()?;
@@ -683,12 +683,12 @@ runcmd:
         let script = format!(
             r#"set -eu
 sudo mkdir -p /etc/containerd/certs.d
-cat > /tmp/pystack_mirrors.json <<'JSON'
+cat > /tmp/stackdeck_mirrors.json <<'JSON'
 {json}
 JSON
 python3 - <<'PY'
 import json, os
-with open('/tmp/pystack_mirrors.json', 'r', encoding='utf-8') as fh:
+with open('/tmp/stackdeck_mirrors.json', 'r', encoding='utf-8') as fh:
     mirrors = json.load(fh)
 for registry, endpoints in mirrors.items():
     d = '/etc/containerd/certs.d/' + registry
@@ -825,7 +825,7 @@ sudo systemctl restart containerd
     pub fn share_add(&self, path: &str, name: Option<&str>) -> Result<String, HyperVError> {
         let share_name = name
             .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("pystack_{}", unix_timestamp()));
+            .unwrap_or_else(|| format!("stackdeck_{}", unix_timestamp()));
         let user = if self.config.smb_user.is_empty() {
             "Everyone"
         } else {
@@ -848,8 +848,8 @@ sudo systemctl restart containerd
             ));
         }
         let share = project_slug(name);
-        let remote = format!("/mnt/pystack-shares/{}", share);
-        let cred = format!("/tmp/pystack-cifs-{}.cred", share);
+        let remote = format!("/mnt/stackdeck-shares/{}", share);
+        let cred = format!("/tmp/stackdeck-cifs-{}.cred", share);
         let unc = format!("//{}/{}", self.config.windows_host, name);
         let cmd = format!(
             "sudo mkdir -p {remote} && printf 'username=%s\npassword=%s\n' {user} {password} | sudo tee {cred} >/dev/null && sudo chmod 600 {cred} && if ! mountpoint -q {remote}; then sudo mount -t cifs {unc} {remote} -o credentials={cred},vers=3.0,iocharset=utf8,noserverino; fi; echo {remote}",
@@ -1041,8 +1041,8 @@ if ($mac) {{
         }
 
         let mut excludes = vec![
-            ".pystack".to_string(),
-            ".pystack-*".to_string(),
+            ".stackdeck".to_string(),
+            ".stackdeck-*".to_string(),
             "__pycache__".to_string(),
             ".git".to_string(),
         ];
@@ -1064,11 +1064,11 @@ if ($mac) {{
         }
 
         let remote_dir = format!(
-            "/tmp/pystack-build-{}",
+            "/tmp/stackdeck-build-{}",
             container_name(&svc.project, &svc.name)
         );
         let temp_dir = std::env::temp_dir().join(format!(
-            "pystack-build-{}",
+            "stackdeck-build-{}",
             container_name(&svc.project, &svc.name)
         ));
         std::fs::create_dir_all(&temp_dir)
@@ -1170,7 +1170,7 @@ if ($mac) {{
 
         let cname = container_name(&svc.project, &svc.name);
         let image = if svc.image.is_empty() {
-            format!("pystack/{}-{}:latest", svc.project, svc.name)
+            format!("stackdeck/{}-{}:latest", svc.project, svc.name)
         } else {
             svc.image.clone()
         };
@@ -1394,7 +1394,7 @@ if ($mac) {{
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             local.to_string_lossy().hash(&mut hasher);
-            let share_name = format!("pystack_{:x}", hasher.finish());
+            let share_name = format!("stackdeck_{:x}", hasher.finish());
             let windows_path = local.to_string_lossy();
             let smb_user = &self.config.smb_user;
             let smb_password = &self.config.smb_password;
@@ -1406,11 +1406,11 @@ if ($mac) {{
             );
             self.ps(&ps_script, true, None)?;
 
-            let remote = format!("/mnt/pystack-shares/{}", share_name);
-            let cred = format!("/etc/pystack/cifs-{}.cred", share_name);
+            let remote = format!("/mnt/stackdeck-shares/{}", share_name);
+            let cred = format!("/etc/stackdeck/cifs-{}.cred", share_name);
             let unc = format!("//{}/{}", windows_host, share_name);
             let mount_cmd = format!(
-                "sudo mkdir -p {remote} && sudo mkdir -p /etc/pystack && printf 'username=%s\npassword=%s\n' {user} {password} | sudo tee {cred} >/dev/null && sudo chmod 600 {cred} && if ! mountpoint -q {remote}; then sudo mount -t cifs {unc} {remote} -o credentials={cred},vers=3.0,iocharset=utf8,noserverino || exit 1; fi",
+                "sudo mkdir -p {remote} && sudo mkdir -p /etc/stackdeck && printf 'username=%s\npassword=%s\n' {user} {password} | sudo tee {cred} >/dev/null && sudo chmod 600 {cred} && if ! mountpoint -q {remote}; then sudo mount -t cifs {unc} {remote} -o credentials={cred},vers=3.0,iocharset=utf8,noserverino || exit 1; fi",
                 remote=remote, user=shell_quote(smb_user), password=shell_quote(smb_password), cred=cred, unc=unc
             );
             self.ssh(&mount_cmd, true)?;
@@ -1673,7 +1673,7 @@ if ($mac) {{
                 );
                 if host_ip == "0.0.0.0" {
                     script = format!(
-                        "if (-not (Get-NetFirewallRule -DisplayName 'PyStack Port {}' -ErrorAction SilentlyContinue)) {{ New-NetFirewallRule -DisplayName 'PyStack Port {}' -Direction Inbound -LocalPort {} -Protocol TCP -Action Allow | Out-Null }}; {}",
+                        "if (-not (Get-NetFirewallRule -DisplayName 'StackDeck Port {}' -ErrorAction SilentlyContinue)) {{ New-NetFirewallRule -DisplayName 'StackDeck Port {}' -Direction Inbound -LocalPort {} -Protocol TCP -Action Allow | Out-Null }}; {}",
                         host_port, host_port, host_port, script
                     );
                 }
@@ -1693,7 +1693,7 @@ if ($mac) {{
                 );
                 if host_ip == "0.0.0.0" {
                     script = format!(
-                        "Remove-NetFirewallRule -DisplayName 'PyStack Port {}' -ErrorAction SilentlyContinue | Out-Null; {}",
+                        "Remove-NetFirewallRule -DisplayName 'StackDeck Port {}' -ErrorAction SilentlyContinue | Out-Null; {}",
                         host_port, script
                     );
                 }
@@ -1863,7 +1863,7 @@ fn timeout_error_message(
 
 /// Generate a container name from project and service.
 pub fn container_name(project: &str, service: &str) -> String {
-    let raw = format!("pystack-{}-{}", project, service).to_lowercase();
+    let raw = format!("stackdeck-{}-{}", project, service).to_lowercase();
     let re = regex::Regex::new(r"[^a-z0-9_.-]+").unwrap();
     let cleaned = re.replace_all(&raw, "-").to_string();
     let trimmed = cleaned.trim_matches('-');
@@ -1876,7 +1876,7 @@ pub fn project_network_name(project: &str) -> String {
     if slug.is_empty() {
         String::new()
     } else {
-        format!("pystack-{}", slug)
+        format!("stackdeck-{}", slug)
     }
 }
 
@@ -2173,19 +2173,19 @@ mod tests {
 
     #[test]
     fn test_container_name() {
-        assert_eq!(container_name("myapp", "web"), "pystack-myapp-web");
+        assert_eq!(container_name("myapp", "web"), "stackdeck-myapp-web");
         assert_eq!(
             container_name("My-App", "Web Server"),
-            "pystack-my-app-web-server"
+            "stackdeck-my-app-web-server"
         );
     }
 
     #[test]
     fn test_project_network_name() {
-        assert_eq!(project_network_name("myapp"), "pystack-myapp");
+        assert_eq!(project_network_name("myapp"), "stackdeck-myapp");
         assert_eq!(
             project_network_name("Smart Surveillance SaaS MVP"),
-            "pystack-smart-surveillance-saas-mvp"
+            "stackdeck-smart-surveillance-saas-mvp"
         );
         assert_eq!(project_network_name("---"), "");
     }
@@ -2261,7 +2261,7 @@ mod tests {
         let cmd = nerdctl_command(&cfg, &["ps", "-a"]);
         assert!(cmd.contains("sudo"));
         assert!(cmd.contains("nerdctl"));
-        assert!(cmd.contains("pystack"));
+        assert!(cmd.contains("stackdeck"));
         assert!(cmd.contains("ps"));
     }
 

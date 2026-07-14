@@ -1,4 +1,4 @@
-//! PyStack Runner CLI entry point.
+//! StackDeck CLI entry point.
 //!
 //! Replaces `__main__.py` and the argparse CLI from `core.py`.
 
@@ -12,7 +12,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG: &str = "stack.json";
 
 #[derive(Parser)]
-#[command(name = "pystack", version = VERSION, about = "Docker-free process orchestrator")]
+#[command(
+    name = "stackdeck",
+    version = VERSION,
+    about = "WSL-free, Docker Desktop-free Hyper-V container runtime"
+)]
 struct Cli {
     /// Path to stack.json
     #[arg(long, global = true, default_value = DEFAULT_CONFIG)]
@@ -545,8 +549,8 @@ fn load_stack_with_backend(
         .to_path_buf()
         .canonicalize()
         .unwrap_or_else(|_| path.parent().unwrap_or(Path::new(".")).to_path_buf());
-    let state_dir = root.join(".pystack");
-    let log_dir = root.join(".pystack/logs");
+    let state_dir = root.join(pystack_types::DEFAULT_STATE_DIR);
+    let log_dir = root.join(pystack_types::DEFAULT_LOG_DIR);
 
     let defaults = raw
         .get("defaults")
@@ -574,7 +578,7 @@ fn load_stack_with_backend(
         volumes: HashMap::new(),
         secrets: HashMap::new(),
         configs: HashMap::new(),
-        source_format: "pystack".to_string(),
+        source_format: "stackdeck".to_string(),
     })
 }
 
@@ -634,8 +638,8 @@ fn compose_project_to_stack(
     backend: &str,
 ) -> Result<pystack_types::StackConfig> {
     let root = project.working_dir.clone();
-    let state_dir = root.join(".pystack");
-    let log_dir = root.join(".pystack/logs");
+    let state_dir = root.join(pystack_types::DEFAULT_STATE_DIR);
+    let log_dir = root.join(pystack_types::DEFAULT_LOG_DIR);
     let mut services = HashMap::new();
     for (name, service) in &project.services {
         services.insert(
@@ -1891,7 +1895,7 @@ fn cmd_diagnostics(config_path: &str, output: &str, tail: u32, text: bool) -> Re
     };
 
     let mut report = String::new();
-    report.push_str("# PyStack diagnostics\n\n");
+    report.push_str("# StackDeck diagnostics\n\n");
     report.push_str(&format!("generated_at: {}\n", now));
     report.push_str(&format!("project: {}\n", stack.project));
     report.push_str(&format!("root: {}\n", stack.root.display()));
@@ -1964,7 +1968,7 @@ fn cmd_diagnostics(config_path: &str, output: &str, tail: u32, text: bool) -> Re
     }
 
     let manifest = serde_json::json!({
-        "format": "pystack-diagnostics-bundle-v1",
+        "format": "stackdeck-diagnostics-bundle-v1",
         "generated_at": now,
         "redacted": true,
         "files": ["summary.md", "stack.redacted.json", "status.redacted.json", "logs/"]
@@ -2177,7 +2181,10 @@ fn cmd_compose_build(file: &str, backend: &str, services: &[String]) -> Result<(
             let hyperv_svc = stack_service_to_hyperv(&stack, svc);
             if hyperv_svc.build.is_some() {
                 let image = if hyperv_svc.image.is_empty() {
-                    format!("pystack/{}-{}:latest", hyperv_svc.project, hyperv_svc.name)
+                    format!(
+                        "stackdeck/{}-{}:latest",
+                        hyperv_svc.project, hyperv_svc.name
+                    )
                 } else {
                     hyperv_svc.image.clone()
                 };

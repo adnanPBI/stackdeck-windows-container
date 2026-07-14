@@ -1,4 +1,4 @@
-//! Docker Engine API shim for PyStack Runner.
+//! Docker Engine API shim for StackDeck.
 //!
 //! Provides a small Docker Engine-compatible HTTP surface for local tooling.
 
@@ -143,7 +143,7 @@ pub async fn serve(host: &str, port: u16, allow_remote: bool) -> Result<(), ApiE
     }
     if auth_token().is_none() {
         return Err(ApiError::BadRequest(
-            "PYSTACK_DOCKER_API_TOKEN must be set to start the API".to_string(),
+            "STACKDECK_DOCKER_API_TOKEN must be set to start the API".to_string(),
         ));
     }
     let listener = TcpListener::bind(addr).await?;
@@ -212,7 +212,7 @@ async fn auth_middleware(
 ) -> Result<impl IntoResponse, ApiError> {
     let Some(token) = auth_token() else {
         return Err(ApiError::Unauthorized(
-            "PYSTACK_DOCKER_API_TOKEN must be set and provided as a Bearer token".into(),
+            "STACKDECK_DOCKER_API_TOKEN must be set and provided as a Bearer token".into(),
         ));
     };
     let valid = request
@@ -591,9 +591,9 @@ fn validate_binds(binds: &[String]) -> Result<(), ApiError> {
     if binds.is_empty() {
         return Ok(());
     }
-    if !env_truthy("PYSTACK_DOCKER_API_ALLOW_BINDS") {
+    if !env_truthy("STACKDECK_DOCKER_API_ALLOW_BINDS") {
         return Err(ApiError::BadRequest(
-            "HostConfig.Binds are disabled by default; set PYSTACK_DOCKER_API_ALLOW_BINDS=1 and PYSTACK_DOCKER_API_BIND_ROOTS to opt in"
+            "HostConfig.Binds are disabled by default; set STACKDECK_DOCKER_API_ALLOW_BINDS=1 and STACKDECK_DOCKER_API_BIND_ROOTS to opt in"
                 .to_string(),
         ));
     }
@@ -620,7 +620,7 @@ fn validate_binds(binds: &[String]) -> Result<(), ApiError> {
 }
 
 fn bind_roots() -> Result<Vec<PathBuf>, ApiError> {
-    let raw = std::env::var("PYSTACK_DOCKER_API_BIND_ROOTS").unwrap_or_default();
+    let raw = std::env::var("STACKDECK_DOCKER_API_BIND_ROOTS").unwrap_or_default();
     let roots: Vec<PathBuf> = raw
         .split(';')
         .map(str::trim)
@@ -637,7 +637,7 @@ fn bind_roots() -> Result<Vec<PathBuf>, ApiError> {
         .collect::<Result<_, _>>()?;
     if roots.is_empty() {
         return Err(ApiError::BadRequest(
-            "PYSTACK_DOCKER_API_BIND_ROOTS must include at least one allowed root when binds are enabled"
+            "STACKDECK_DOCKER_API_BIND_ROOTS must include at least one allowed root when binds are enabled"
                 .to_string(),
         ));
     }
@@ -662,7 +662,7 @@ fn allocate_host_port() -> u16 {
 }
 
 fn auth_token() -> Option<String> {
-    std::env::var("PYSTACK_DOCKER_API_TOKEN")
+    std::env::var("STACKDECK_DOCKER_API_TOKEN")
         .ok()
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
@@ -1468,9 +1468,9 @@ mod tests {
             } else {
                 std::env::remove_var("HOME");
             }
-            restore_env("PYSTACK_DOCKER_API_TOKEN", &self.old_token);
-            restore_env("PYSTACK_DOCKER_API_ALLOW_BINDS", &self.old_allow_binds);
-            restore_env("PYSTACK_DOCKER_API_BIND_ROOTS", &self.old_bind_roots);
+            restore_env("STACKDECK_DOCKER_API_TOKEN", &self.old_token);
+            restore_env("STACKDECK_DOCKER_API_ALLOW_BINDS", &self.old_allow_binds);
+            restore_env("STACKDECK_DOCKER_API_BIND_ROOTS", &self.old_bind_roots);
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }
@@ -1485,18 +1485,18 @@ mod tests {
 
     fn isolated_home() -> IsolatedHome {
         let guard = TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-        let path = std::env::temp_dir().join(format!("pystack-api-test-{}", new_id()));
+        let path = std::env::temp_dir().join(format!("stackdeck-api-test-{}", new_id()));
         std::fs::create_dir_all(&path).unwrap();
         let old_userprofile = std::env::var("USERPROFILE").ok();
         let old_home = std::env::var("HOME").ok();
-        let old_token = std::env::var("PYSTACK_DOCKER_API_TOKEN").ok();
-        let old_allow_binds = std::env::var("PYSTACK_DOCKER_API_ALLOW_BINDS").ok();
-        let old_bind_roots = std::env::var("PYSTACK_DOCKER_API_BIND_ROOTS").ok();
+        let old_token = std::env::var("STACKDECK_DOCKER_API_TOKEN").ok();
+        let old_allow_binds = std::env::var("STACKDECK_DOCKER_API_ALLOW_BINDS").ok();
+        let old_bind_roots = std::env::var("STACKDECK_DOCKER_API_BIND_ROOTS").ok();
         std::env::set_var("USERPROFILE", &path);
         std::env::remove_var("HOME");
-        std::env::set_var("PYSTACK_DOCKER_API_TOKEN", TEST_TOKEN);
-        std::env::remove_var("PYSTACK_DOCKER_API_ALLOW_BINDS");
-        std::env::remove_var("PYSTACK_DOCKER_API_BIND_ROOTS");
+        std::env::set_var("STACKDECK_DOCKER_API_TOKEN", TEST_TOKEN);
+        std::env::remove_var("STACKDECK_DOCKER_API_ALLOW_BINDS");
+        std::env::remove_var("STACKDECK_DOCKER_API_BIND_ROOTS");
         IsolatedHome {
             path,
             old_userprofile,
@@ -1633,7 +1633,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn auth_token_is_enforced_when_configured() {
         let _home = isolated_home();
-        std::env::set_var("PYSTACK_DOCKER_API_TOKEN", "secret");
+        std::env::set_var("STACKDECK_DOCKER_API_TOKEN", "secret");
 
         let unauthorized = app()
             .oneshot(

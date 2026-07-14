@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)][ValidateSet("Prereqs","Build","Configure","Init","Smoke","ApiTask","Diagnostics","All")][string]$Phase,
-  [string]$PystackExe = "pystack",
+  [string]$PystackExe = "stackdeck",
   [string]$Sha256 = "",
   [string]$SmbPassword = "",
   [switch]$EnableFeatures,
@@ -26,7 +26,7 @@ switch ($Phase) {
     if (-not $Sha256) { throw "-Sha256 is required for All." }
     Run "00-Ensure-Prereqs.ps1" @($(if($EnableFeatures){"-EnableFeatures"}))
     Run "01-Build-Release.ps1" @($(if($SkipDesktop){"-SkipDesktop"}))
-    $BuiltPystack = Join-Path (Resolve-Path (Join-Path $Root "..\..")) "target\release\pystack.exe"
+    $BuiltPystack = Join-Path (Resolve-Path (Join-Path $Root "..\..")) "target\release\stackdeck.exe"
     Run "02-Configure-HyperV.ps1" @("-PystackExe", $BuiltPystack, "-SmbPassword", $SmbPassword)
     Run "03-Init-HyperV-Runtime.ps1" @("-PystackExe", $BuiltPystack, "-Sha256", $Sha256)
     Run "04-Smoke-Test.ps1" @("-PystackExe", $BuiltPystack)

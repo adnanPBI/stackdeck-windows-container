@@ -31,10 +31,12 @@
     "shortDescription": "Offline desktop control plane for local StackDeck stacks.",
     "longDescription": "StackDeck packages a React/Vite UI, Tauri shell, and stackdeck-hive.exe command backend for offline Windows stack management.",
     "icon": ["icons/icon.ico"],
+    "resources": ["resources/installer/Configure-StackDeckInstall.ps1"],
     "externalBin": ["bin/stackdeck-hive"],
     "windows": {
       "nsis": {
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installerHooks": "windows/nsis-hooks.nsh"
       },
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

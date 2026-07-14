@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "PyStack Runner CLI"
+description = "StackDeck CLI"
+
+[[bin]]
+name = "stackdeck"
+path = "src/main.rs"
 
 [[bin]]
 name = "pystack"

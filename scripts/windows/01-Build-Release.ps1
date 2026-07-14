@@ -10,7 +10,7 @@ Set-Location $RepoRoot
 cargo fmt --check
 if (-not $SkipTests) { cargo test --workspace --locked }
 cargo build --workspace --locked
-cargo build -p pystack-cli --bin pystack --release --locked
+cargo build -p pystack-cli --bin stackdeck --release --locked
 cargo build -p pystack-cli --bin hive --release --locked
 
 if (-not $SkipDesktop) {
@@ -23,5 +23,5 @@ if (-not $SkipDesktop) {
 }
 
 Write-Host "Build complete." -ForegroundColor Green
-Write-Host "CLI: $RepoRoot\target\release\pystack.exe"
+Write-Host "CLI: $RepoRoot\target\release\stackdeck.exe"
 Write-Host "Hive sidecar: $RepoRoot\target\release\hive.exe"

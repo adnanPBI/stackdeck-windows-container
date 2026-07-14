@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param(
-  [string]$PystackExe = "pystack",
+  [string]$PystackExe = "stackdeck",
   [string]$Config = "stack.json",
-  [string]$Output = ".pystack\diagnostics",
+  [string]$Output = ".stackdeck\diagnostics",
   [UInt32]$Tail = 200
 )
 $ErrorActionPreference = "Stop"

@@ -1,4 +1,4 @@
-//! Shared data types for PyStack Runner.
+//! Shared data types for StackDeck.
 //!
 //! These types mirror the Python dataclasses from `core.py`, `compose_support.py`,
 //! and `hyperv_backend.py`, providing a common vocabulary for all crates.
@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub const APP_NAME: &str = "pystack-runner";
+pub const APP_NAME: &str = "stackdeck";
 pub const VERSION: &str = "0.5.0";
 pub const DEFAULT_CONFIG: &str = "stack.json";
-pub const DEFAULT_STATE_DIR: &str = ".pystack";
-pub const DEFAULT_LOG_DIR: &str = ".pystack/logs";
+pub const DEFAULT_STATE_DIR: &str = ".stackdeck";
+pub const DEFAULT_LOG_DIR: &str = ".stackdeck/logs";
 
 /// Sensitive environment variable name hints used for log redaction.
 pub const SAFE_ENV_NAME_HINTS: &[&str] = &[
@@ -34,7 +34,7 @@ pub fn generate_random_password() -> String {
         .as_nanos();
     let r1 = seed % 1_000_000;
     let r2 = (seed / 1_000_000) % 1_000_000;
-    format!("Pystack_{:06}_{:06}!", r1, r2)
+    format!("StackDeck_{:06}_{:06}!", r1, r2)
 }
 
 // ---------------------------------------------------------------------------
@@ -234,7 +234,7 @@ pub struct StackConfig {
 
 impl StackConfig {
     fn default_source_format() -> String {
-        "pystack".into()
+        "stackdeck".into()
     }
 }
 
@@ -447,7 +447,7 @@ pub struct ComposeProject {
 // Hyper-V types (from hyperv_backend.py)
 // ---------------------------------------------------------------------------
 
-/// Hyper-V VM configuration stored in `~/.pystack_runner/hyperv.json`.
+/// Hyper-V VM configuration stored in `~/.stackdeck_runner/hyperv.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HyperVConfig {
     #[serde(default = "HyperVConfig::default_vm_name")]
@@ -495,7 +495,7 @@ impl HyperVConfig {
         "stackdeck-linux".into()
     }
     fn default_ssh_user() -> String {
-        "pystack".into()
+        "stackdeck".into()
     }
     fn default_ssh_port() -> u16 {
         22
@@ -514,13 +514,13 @@ impl HyperVConfig {
     }
     fn default_vm_root() -> String {
         let home = dirs_home();
-        format!("{}/PyStackVMs/stackdeck-linux", home)
+        format!("{}/StackDeckVMs/stackdeck-linux", home)
     }
     fn default_runtime() -> String {
         "nerdctl".into()
     }
     fn default_namespace() -> String {
-        "pystack".into()
+        "stackdeck".into()
     }
 }
 
@@ -616,9 +616,9 @@ fn dirs_home() -> String {
         .unwrap_or_else(|_| ".".into())
 }
 
-/// Get the registry directory (`~/.pystack_runner`).
+/// Get the registry directory (`~/.stackdeck_runner`).
 pub fn registry_dir() -> PathBuf {
-    PathBuf::from(dirs_home()).join(".pystack_runner")
+    PathBuf::from(dirs_home()).join(".stackdeck_runner")
 }
 
 /// Get the projects registry file path.
@@ -661,7 +661,7 @@ mod tests {
     fn hyperv_config_defaults() {
         let cfg = HyperVConfig::default();
         assert_eq!(cfg.vm_name, "stackdeck-linux");
-        assert_eq!(cfg.ssh_user, "pystack");
+        assert_eq!(cfg.ssh_user, "stackdeck");
         assert_eq!(cfg.ssh_port, 22);
         assert_eq!(cfg.switch_name, "Default Switch");
         assert_eq!(cfg.vm_memory_mb, 4096);

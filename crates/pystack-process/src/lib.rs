@@ -1136,13 +1136,13 @@ mod tests {
             project: "volume-safety".into(),
             root: root.clone(),
             config_path: root.join("stack.json"),
-            state_dir: root.join(".pystack"),
-            log_dir: root.join(".pystack/logs"),
+            state_dir: root.join(pystack_types::DEFAULT_STATE_DIR),
+            log_dir: root.join(pystack_types::DEFAULT_LOG_DIR),
             services,
             volumes: HashMap::new(),
             secrets: HashMap::new(),
             configs: HashMap::new(),
-            source_format: "pystack".into(),
+            source_format: "stackdeck".into(),
         };
         let mgr = ProcessManager::new(stack).unwrap();
 
