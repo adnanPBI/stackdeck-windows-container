@@ -17,7 +17,8 @@ if (-not $Token) {
 }
 $TokenPath = Join-Path $ConfigRoot "docker-api-token.txt"
 Set-Content -Path $TokenPath -Value $Token -Encoding ASCII
-icacls $TokenPath /inheritance:r /grant:r "$env:USERNAME:F" "Administrators:F" | Out-Null
+$UserGrant = "$($env:USERNAME):F"
+icacls $TokenPath /inheritance:r /grant:r $UserGrant "Administrators:F" | Out-Null
 
 $Command = "`$env:STACKDECK_DOCKER_API_TOKEN = Get-Content -Raw '$TokenPath'; `$env:STACKDECK_DOCKER_API_TOKEN = `$env:STACKDECK_DOCKER_API_TOKEN.Trim(); & '$PystackExe' daemon serve --host '$HostIp' --port $Port"
 $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -Command `"$Command`""

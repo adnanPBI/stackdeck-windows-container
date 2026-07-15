@@ -7,7 +7,14 @@ param(
   [UInt32]$Timeout = 900
 )
 $ErrorActionPreference = "Stop"
-& $PystackExe hyperv ensure-key
+function Invoke-Checked {
+  param([string[]]$CommandArgs)
+  & $PystackExe @CommandArgs
+  if ($LASTEXITCODE -ne 0) {
+    throw "$PystackExe $($CommandArgs -join ' ') failed with exit code $LASTEXITCODE"
+  }
+}
+Invoke-Checked -CommandArgs @("hyperv", "ensure-key")
 $args = @("hyperv", "init", "--timeout", "$Timeout")
 if ($ImageVhdx) {
   $args += @("--image-vhdx", $ImageVhdx)
@@ -17,5 +24,5 @@ if ($ImageVhdx) {
   }
   $args += @("--url", $ImageUrl, "--sha256", $Sha256)
 }
-& $PystackExe @args
-& $PystackExe hyperv health
+Invoke-Checked -CommandArgs $args
+Invoke-Checked -CommandArgs @("hyperv", "health")

@@ -62,8 +62,20 @@ $results.Add((Check-Command "rustc" $true))
 $results.Add((Check-Command "node" $false))
 $results.Add((Check-Command "npm" $false))
 
-if (-not (Test-Path "D:\")) {
-  $results.Add([pscustomobject]@{ Check = "D drive"; Status = "MISSING"; Detail = "Configure another -VmRoot/-ImageRoot" })
+function Get-RootDrive($Path) {
+  try {
+    return [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Path))
+  } catch {
+    return ""
+  }
+}
+
+$vmDrive = Get-RootDrive $VmRoot
+$imageDrive = Get-RootDrive $ImageRoot
+if (-not $vmDrive -or -not (Test-Path -LiteralPath $vmDrive)) {
+  $results.Add([pscustomobject]@{ Check = "VM root drive"; Status = "MISSING"; Detail = "Drive for $VmRoot does not exist" })
+} elseif (-not $imageDrive -or -not (Test-Path -LiteralPath $imageDrive)) {
+  $results.Add([pscustomobject]@{ Check = "Image root drive"; Status = "MISSING"; Detail = "Drive for $ImageRoot does not exist" })
 } else {
   New-Item -ItemType Directory -Force -Path $VmRoot | Out-Null
   New-Item -ItemType Directory -Force -Path $ImageRoot | Out-Null

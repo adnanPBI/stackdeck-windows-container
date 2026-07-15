@@ -340,8 +340,10 @@ if (!(Test-Path $disk)) {{ New-VHD -Path $disk -Dynamic -SizeBytes {disk_gb}GB |
 New-VM -Name $name -Generation 2 -MemoryStartupBytes {memory_mb}MB -VHDPath $disk -SwitchName $switchName -Path $root | Out-Null
 Set-VMProcessor -VMName $name -Count {cpus}
 Set-VMMemory -VMName $name -DynamicMemoryEnabled $true -MinimumBytes 1024MB -StartupBytes {memory_mb}MB -MaximumBytes {memory_mb}MB
+Set-VM -Name $name -AutomaticCheckpointsEnabled $false
 if ($iso -and (Test-Path $iso)) {{ Add-VMDvdDrive -VMName $name -Path $iso | Out-Null }}
-try {{ Set-VMFirmware -VMName $name -EnableSecureBoot On -SecureBootTemplate 'MicrosoftUEFICertificateAuthority' }} catch {{}}
+$bootDisk = Get-VMHardDiskDrive -VMName $name | Select-Object -First 1
+try {{ Set-VMFirmware -VMName $name -EnableSecureBoot Off -FirstBootDevice $bootDisk }} catch {{}}
 (Get-VM -Name $name).State
 "#,
             name = ps_quote(&self.config.vm_name),
@@ -391,8 +393,10 @@ try {{ Resize-VHD -Path $disk -SizeBytes {disk_gb}GB }} catch {{ Write-Warning $
 New-VM -Name $name -Generation 2 -MemoryStartupBytes {memory_mb}MB -VHDPath $disk -SwitchName $switchName -Path $root | Out-Null
 Set-VMProcessor -VMName $name -Count {cpus}
 Set-VMMemory -VMName $name -DynamicMemoryEnabled $true -MinimumBytes 1024MB -StartupBytes {memory_mb}MB -MaximumBytes {memory_mb}MB
+Set-VM -Name $name -AutomaticCheckpointsEnabled $false
 Add-VMDvdDrive -VMName $name -Path $seed | Out-Null
-try {{ Set-VMFirmware -VMName $name -EnableSecureBoot On -SecureBootTemplate 'MicrosoftUEFICertificateAuthority' }} catch {{}}
+$bootDisk = Get-VMHardDiskDrive -VMName $name | Select-Object -First 1
+try {{ Set-VMFirmware -VMName $name -EnableSecureBoot Off -FirstBootDevice $bootDisk }} catch {{}}
 if (-not {no_start}) {{ Start-VM -Name $name | Out-Null }}
 (Get-VM -Name $name).State
 "#,
@@ -529,7 +533,16 @@ sudo nerdctl --namespace stackdeck version >/dev/null
             return Ok(());
         }
         let script = format!(
-            "(Get-FileHash -Algorithm SHA256 -Path '{}').Hash.ToLowerInvariant()",
+            r#"$path = '{}'
+$sha = [System.Security.Cryptography.SHA256]::Create()
+$stream = [System.IO.File]::OpenRead($path)
+try {{
+  $hash = $sha.ComputeHash($stream)
+  -join ($hash | ForEach-Object {{ $_.ToString('x2') }})
+}} finally {{
+  $stream.Dispose()
+  $sha.Dispose()
+}}"#,
             ps_quote(&path.to_string_lossy())
         );
         let actual = self
@@ -569,6 +582,14 @@ $qemu = Get-Command qemu-img.exe -ErrorAction SilentlyContinue
 if (-not $qemu) {{ $qemu = Get-Command qemu-img -ErrorAction SilentlyContinue }}
 if (-not $qemu) {{ throw 'qemu-img is required to convert qcow2/img cloud images to VHDX. Install qemu-img or provide a pre-converted .vhdx with --image-vhdx.' }}
 & $qemu.Source convert -O vhdx -o subformat=dynamic $src $out
+if ($LASTEXITCODE -ne 0) {{ throw "qemu-img conversion failed with exit code $LASTEXITCODE" }}
+& compact.exe /U /I $out | Out-Null
+& cipher.exe /D $out | Out-Null
+& fsutil.exe sparse setflag $out 0 | Out-Null
+$attrs = (Get-Item -LiteralPath $out).Attributes
+if (($attrs -band [System.IO.FileAttributes]::Compressed) -or ($attrs -band [System.IO.FileAttributes]::Encrypted) -or ($attrs -band [System.IO.FileAttributes]::SparseFile)) {{
+    throw "Converted VHDX still has unsupported NTFS attributes: $attrs"
+}}
 Resize-VHD -Path $out -SizeBytes {disk_gb}GB
 "#,
             src = ps_quote(&source.to_string_lossy()),
@@ -594,6 +615,7 @@ users:
 ssh_pwauth: false
 package_update: true
 packages:
+  - openssh-server
   - ca-certificates
   - curl
   - gnupg
@@ -602,6 +624,7 @@ packages:
   - cloud-guest-utils
   - uidmap
 runcmd:
+  - [ systemctl, enable, --now, ssh ]
   - [ systemctl, enable, --now, containerd ]
   - [ growpart, /dev/sda, '1' ]
   - [ resize2fs, /dev/sda1 ]
@@ -985,7 +1008,7 @@ if ($mac) {{
         args.insert(1, "-o".to_string());
         args.insert(2, format!("ConnectTimeout={}", timeout_secs.max(1)));
         args.push("true".to_string());
-        self.run_cmd(&args, false, Some(timeout_secs)).is_ok()
+        self.run_cmd(&args, true, Some(timeout_secs)).is_ok()
     }
 
     // -----------------------------------------------------------------------

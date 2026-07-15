@@ -9,8 +9,13 @@ param(
   [string]$Sha256 = "",
   [string]$SmbPassword = "",
   [string]$EvidenceDir = ".stackdeck\clean-machine-proof",
+  [string]$QemuPath = "C:\Program Files\qemu",
+  [UInt32]$MemoryMB = 4096,
+  [UInt32]$Cpus = 2,
+  [UInt32]$DiskGB = 10,
   [UInt16]$ApiPort = 23750,
   [switch]$SkipInstall,
+  [switch]$SkipBuild,
   [switch]$SkipInit,
   [switch]$SkipApi
 )
@@ -18,6 +23,9 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Set-Location $RepoRoot
+if ($QemuPath -and (Test-Path -LiteralPath $QemuPath)) {
+  $env:Path = "$QemuPath;$env:Path"
+}
 
 function Write-ProofLog {
   param([string]$Message)
@@ -33,7 +41,11 @@ function Invoke-ProofStep {
   Write-Host "==> $Name" -ForegroundColor Cyan
   Write-ProofLog "STEP_START $Name"
   try {
+    $global:LASTEXITCODE = 0
     & $Script 2>&1 | Tee-Object -FilePath (Join-Path $EvidenceDir "$($Name -replace '[^A-Za-z0-9_.-]', '_').log")
+    if ($global:LASTEXITCODE -ne 0) {
+      throw "Native command failed with exit code $global:LASTEXITCODE"
+    }
     Write-ProofLog "STEP_OK $Name"
   } catch {
     Write-ProofLog "STEP_FAIL $Name $($_.Exception.Message)"
@@ -50,11 +62,20 @@ Write-ProofLog "pystack_exe=$PystackExe"
 Write-ProofLog "vm_root=$VmRoot"
 
 Invoke-ProofStep "00-prereqs" {
-  .\scripts\windows\00-Ensure-Prereqs.ps1 -EnableFeatures
+  $args = @{ EnableFeatures = $true }
+  if ($VmRoot) {
+    $args.VmRoot = $VmRoot
+    $args.ImageRoot = Split-Path -Parent (Split-Path -Parent $VmRoot)
+  }
+  .\scripts\windows\00-Ensure-Prereqs.ps1 @args
 }
 
-Invoke-ProofStep "01-build" {
-  .\scripts\windows\01-Build-Release.ps1 -SkipDesktop
+if (-not $SkipBuild) {
+  Invoke-ProofStep "01-build" {
+    .\scripts\windows\01-Build-Release.ps1 -SkipDesktop
+  }
+} else {
+  Write-ProofLog "build_skipped"
 }
 
 if (-not $SkipInstall) {
@@ -81,6 +102,9 @@ Invoke-ProofStep "03-configure-hyperv" {
   }
   if ($SmbPassword) { $args.SmbPassword = $SmbPassword }
   if ($VmRoot) { $args.VmRoot = $VmRoot }
+  $args.MemoryMB = $MemoryMB
+  $args.Cpus = $Cpus
+  $args.DiskGB = $DiskGB
   .\scripts\windows\02-Configure-HyperV.ps1 @args
 }
 
@@ -115,7 +139,7 @@ if (-not $SkipApi) {
 }
 
 Invoke-ProofStep "07-diagnostics" {
-  .\scripts\windows\06-Diagnostics.ps1 -PystackExe $PystackExe -Config stack.json -Output (Join-Path $EvidenceDir "diagnostics") -Tail 200
+  .\scripts\windows\06-Diagnostics.ps1 -PystackExe $PystackExe -Config "examples\smoke\docker-compose.yml" -Output (Join-Path $EvidenceDir "diagnostics") -Tail 200 -Backend hyperv
 }
 
 Write-ProofLog "StackDeck clean-machine proof complete"
