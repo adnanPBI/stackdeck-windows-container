@@ -1,0 +1,31 @@
+[package]
+name = "pystack-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "PyStack Runner CLI"
+
+[[bin]]
+name = "pystack"
+path = "src/main.rs"
+
+[[bin]]
+name = "hive"
+path = "src/main.rs"
+
+[dependencies]
+pystack-types = { workspace = true }
+pystack-compose = { workspace = true }
+pystack-state = { workspace = true }
+pystack-process = { workspace = true }
+pystack-hyperv = { workspace = true }
+pystack-api = { workspace = true }
+pystack-gui = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }

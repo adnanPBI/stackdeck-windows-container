@@ -1,0 +1,164 @@
+after creating nsis or msi package, will it create hyper-v VM on the target system automatically or user will have to
+  create manually using powershell? shall the install package will create fixed size VM or automated size as per free
+  space??
+
+  I now have the complete picture. Let me compile the full, precise answer:
+  ──────
+  ## How VM Creation Works in the Package — Precise Answer
+
+  ### 1. Does the NSIS/MSI Package Create the VM Automatically?
+
+  ❌ NO. The installer does NOT create the VM.
+
+  Here's exactly what happens at each stage:
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  NSIS / MSI Installer  (what it DOES do)                        │
+    │                                                                  │
+    │  ✅ Copies  pystack.exe + hive.exe + stackdeck-hive.exe         │
+    │  ✅ Installs Tauri GUI (StackDeck.exe)                           │
+    │  ✅ Creates Start Menu shortcut                                  │
+    │  ✅ Sets up uninstaller                                          │
+    │  ✅ Optionally installs WebView2 bootstrapper                    │
+    │                                                                  │
+    │  ❌ Does NOT: create Hyper-V VM                                  │
+    │  ❌ Does NOT: download cloud image                               │
+    │  ❌ Does NOT: run any PowerShell scripts                         │
+    │  ❌ Does NOT: check for Hyper-V feature                          │
+    │  ❌ Does NOT: run any first-run wizard                           │
+    └─────────────────────────────────────────────────────────────────┘
+
+  The user must run the following manually after install (from an Admin PowerShell):
+
+    # Step 1 — Configure VM parameters
+    pystack hyperv configure --vm-name stackdeck-linux --disk-gb 20 --memory-mb 4096
+
+    # Step 2 — Generate SSH key
+    pystack hyperv ensure-key
+
+    # Step 3 — Download image + create VM + bootstrap (single command)
+    pystack hyperv init --url https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img --sha256
+  <sha256>
+
+    # Step 4 — Verify
+    pystack hyperv health
+
+  Or use the all-in-one deployment script:
+
+    .\scripts\windows\Invoke-PyStackLocalDeploy.ps1 -Phase All -Sha256 <sha256>
+    ──────
+  ### 2. Fixed Size or Dynamic Size?
+
+  The VHDX disk is DYNAMIC, but with a configurable fixed ceiling.
+
+  Here's exactly what the code does (lib.rs):
+
+    # What Hyper-V creates:
+    New-VHD -Path $disk -Dynamic -SizeBytes {disk_gb}GB
+
+   Property                                   │ Current Behaviour
+  ────────────────────────────────────────────┼───────────────────────────────────────────────────────────────────────
+   VHDX type                                  │ Dynamic (sparse on disk, grows on write)
+   Logical ceiling                            │  vm_disk_gb  from config — hardcoded default: 10 GB
+   Floor                                      │ Clamped to  max(10)  — will never go below 10 GB regardless of config
+   Based on free space?                       │ ❌ NO — no free-space detection for disk sizing
+   Configurable by user                       │ ✅ YES —  pystack hyperv configure --disk-gb 40
+
+  Memory is different — it DOES auto-adapt to available RAM:
+
+    # From the code (vm_start method):
+    $freeMb = [math]::Floor($os.FreePhysicalMemory / 1024)
+    $availableMb = $freeMb - 1024          # keeps 1GB for Windows
+    $targetMb = if ($availableMb -lt $configuredMb) { $availableMb } else { $configuredMb }
+    if ($targetMb -lt 1024) { $targetMb = 1024 }   # minimum 1GB
+    Set-VMMemory -DynamicMemoryEnabled $true -StartupBytes ($targetMb * 1MB) -MaximumBytes ($configuredMb * 1MB)
+
+  So:
+
+  • Disk: Dynamic VHDX, size ceiling is operator-configured (default 10 GB), NOT auto-detected from free space
+  • Memory: Auto-adapts on VM start — uses  min(freeRAM - 1GB, configuredMax) , minimum 1 GB
+  ──────
+  ### 3. What Should Be Built for a Real Production Installer
+
+  As it stands, the installer is incomplete for a fully automated end-user experience. Here's what's missing and what
+  would need to be added:
+
+   Gap                              │ What's Needed
+  ──────────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────
+   No Hyper-V check at install time │ NSIS  ExecWait  to check  (Get-WindowsOptionalFeature -Online -FeatureName
+                                    │ Microsoft-Hyper-V-All).State
+   No first-run wizard              │ A GUI setup wizard in Tauri (currently no wizard screen exists)
+   No VM auto-creation              │ A "Setup Runtime" button in the GUI that calls  pystack hyperv init  — wiring
+                                    │ exists, button does not
+   No free-space check for disk     │ Add `Get-PSDrive C
+   SHA-256 hardcoded nowhere        │ User must paste it; should be fetched from Ubuntu's  SHA256SUMS  file
+   No progress UI during init       │  init  can take 10–15 minutes; no progress bar exists in the installer
+
+  │ Bottom line: The installer packages the binaries. A user still needs to run  pystack hyperv init  (or the
+  │ equivalent script) after installation to actually create the VM. For a true one-click installer experience, a post-
+  │ install setup wizard would need to be built into the Tauri GUI — that work does not exist yet.
+
+=====================================================================
+
+
+• I ran the proof honestly on this host. It does not yet pass clean-machine end-to-end
+  runtime proof.
+
+  What passed:
+
+  - Admin/Hyper-V/OpenSSH/qemu prereqs pass.
+  - VM root selection to F:\StackDeck\VMs\stackdeck-linux works.
+  - qemu VHDX conversion now gets past the previous sparse/compressed VHDX Resize-VHD
+    failure.
+
+  - Docker API shim starts on loopback and authenticated routes work:
+      - /_ping => OK
+      - /version => JSON response
+      - /info => JSON response
+
+  - Repo validation passed:
+      - cargo fmt --check
+      - scoped core tests: 66 passed
+      - release builds: pystack.exe and hive.exe
+
+  What failed:
+
+  - Runtime bootstrap still fails before container workload proof.
+  - Tested images:
+      - official KVM qcow2: VM boots according to Hyper-V event log, but no usable IP/
+        heartbeat path.
+
+      - local Azure VHDX: VM gets Hyper-V heartbeat/IP, but port 22 refuses SSH for 900s.
+      - official generic Ubuntu .img: also fails SSH readiness within 900s.
+
+  - Therefore these did not complete:
+      - bootstrap containerd/nerdctl inside VM
+      - run compose workload
+      - prove API shim against real VM-backed containers
+
+  Evidence is in:
+
+  - .stackdeck\current-host-proof-generic\proof.log
+  - .stackdeck\current-host-proof-azure\proof.log
+  - .stackdeck\current-host-proof\proof.log
+
+  I also fixed and pushed hardening found during the run:
+
+  Commit pushed:
+  c49528a Harden Hyper-V proof bootstrap
+
+  Key fixes:
+
+  - real SSH probe failure detection
+  - strict native-command exit checks in init/smoke/diagnostics scripts
+  - qemu VHDX NTFS attribute normalization before Resize-VHD
+  - no hardcoded D:\ prereq assumption
+  - MSI/API task ACL bug fix
+  - explicit openssh-server install/start in cloud-init
+  - automatic checkpoints disabled for runtime VMs
+  - proof script supports qemu path, memory/CPU/disk options, and skipped build
+
+  Current honest status: the project is closer, but the remaining blocker is first-boot
+  Linux image provisioning/cloud-init/SSH readiness. Until that is fixed, I cannot confirm
+  the full WSL-free, Docker Desktop-free, Hyper-V-backed local container runtime end-to-
+  end.
