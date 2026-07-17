@@ -278,6 +278,7 @@ impl HyperVManager {
         url: &str,
         output: &str,
         sha256: Option<&str>,
+        sha512: Option<&str>,
         force: bool,
     ) -> Result<(), HyperVError> {
         if url.trim().is_empty() {
@@ -288,7 +289,7 @@ impl HyperVManager {
                 .rsplit('/')
                 .next()
                 .filter(|value| !value.is_empty())
-                .unwrap_or("ubuntu-cloud.img");
+                .unwrap_or("debian-cloud.img");
             PathBuf::from(&self.config.vm_root)
                 .join("images")
                 .join(file_name)
@@ -298,6 +299,9 @@ impl HyperVManager {
         if output_path.exists() && !force {
             if let Some(expected) = sha256 {
                 self.verify_file_sha256(&output_path, expected)?;
+            }
+            if let Some(expected) = sha512 {
+                self.verify_file_sha512(&output_path, expected)?;
             }
             return Ok(());
         }
@@ -325,6 +329,9 @@ Move-Item -Force $tmp $out
         if let Some(expected) = sha256 {
             self.verify_file_sha256(&output_path, expected)?;
         }
+        if let Some(expected) = sha512 {
+            self.verify_file_sha512(&output_path, expected)?;
+        }
         Ok(())
     }
 
@@ -345,6 +352,7 @@ $freeMb = [math]::Floor($os.FreePhysicalMemory / 1024)
 $availableMb = $freeMb - 1024
 $targetMb = if ($availableMb -lt $configuredMb) {{ $availableMb }} else {{ $configuredMb }}
 if ($targetMb -lt 1024) {{ $targetMb = 1024 }}
+$targetMb = [int]([math]::Floor($targetMb / 2) * 2)
 if (Get-VM -Name $name -ErrorAction SilentlyContinue) {{ throw "VM '$name' already exists" }}
 if (!(Test-Path $root)) {{ New-Item -ItemType Directory -Force -Path $root | Out-Null }}
 if (!(Test-Path $disk)) {{ New-VHD -Path $disk -Dynamic -SizeBytes {disk_gb}GB | Out-Null }}
@@ -412,6 +420,7 @@ $freeMb = [math]::Floor($os.FreePhysicalMemory / 1024)
 $availableMb = $freeMb - 1024
 $targetMb = if ($availableMb -lt $configuredMb) {{ $availableMb }} else {{ $configuredMb }}
 if ($targetMb -lt 1024) {{ $targetMb = 1024 }}
+$targetMb = [int]([math]::Floor($targetMb / 2) * 2)
 if (Get-VM -Name $name -ErrorAction SilentlyContinue) {{ throw "VM '$name' already exists. Stop/remove it or choose another --vm-name." }}
 if (!(Test-Path $root)) {{ New-Item -ItemType Directory -Force -Path $root | Out-Null }}
 Copy-Item -Force $src $disk
@@ -441,10 +450,26 @@ if (-not {no_start}) {{ Start-VM -Name $name | Out-Null }}
         );
         self.ps(&script, true, Some(240))?;
         if discover_ip && !no_start {
-            let ip = self.discover_ip(timeout)?;
-            let mut cfg = self.config.clone();
-            cfg.ssh_host = ip;
-            HyperVManager::save_config(&cfg)?;
+            match self.discover_ip(timeout) {
+                Ok(ip) => {
+                    let mut cfg = self.config.clone();
+                    cfg.ssh_host = ip;
+                    HyperVManager::save_config(&cfg)?;
+                }
+                Err(first_err) => {
+                    eprintln!(
+                        "initial IP discovery failed; power-cycling VM once and retrying: {}",
+                        first_err
+                    );
+                    let _ = self.vm_stop();
+                    thread::sleep(Duration::from_secs(10));
+                    self.vm_start()?;
+                    let ip = self.discover_ip(timeout)?;
+                    let mut cfg = self.config.clone();
+                    cfg.ssh_host = ip;
+                    HyperVManager::save_config(&cfg)?;
+                }
+            }
         }
         Ok(())
     }
@@ -454,6 +479,7 @@ if (-not {no_start}) {{ Start-VM -Name $name | Out-Null }}
         image_vhdx: &str,
         url: Option<&str>,
         sha256: Option<&str>,
+        sha512: Option<&str>,
         timeout: u32,
     ) -> Result<(), HyperVError> {
         let root = PathBuf::from(&self.config.vm_root);
@@ -467,9 +493,9 @@ if (-not {no_start}) {{ Start-VM -Name $name | Out-Null }}
                     .rsplit('/')
                     .next()
                     .filter(|v| !v.is_empty())
-                    .unwrap_or("ubuntu-cloud.img"),
+                    .unwrap_or("debian-cloud.img"),
             );
-            self.download_image(image_url, &raw.to_string_lossy(), sha256, false)?;
+            self.download_image(image_url, &raw.to_string_lossy(), sha256, sha512, false)?;
             raw
         } else {
             PathBuf::from(image_vhdx)
@@ -589,6 +615,42 @@ if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {{
         if actual != expected {
             return Err(HyperVError::Config(format!(
                 "SHA256 mismatch for {}: expected {}, got {}",
+                path.display(),
+                expected,
+                actual
+            )));
+        }
+        Ok(())
+    }
+
+    fn verify_file_sha512(&self, path: &Path, expected: &str) -> Result<(), HyperVError> {
+        let expected = expected.trim().to_ascii_lowercase();
+        if expected.is_empty() {
+            return Ok(());
+        }
+        let script = format!(
+            r#"$path = '{path}'
+if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {{
+  (Get-FileHash -Algorithm SHA512 -Path $path).Hash.ToLowerInvariant()
+}} else {{
+  $sha = [System.Security.Cryptography.SHA512]::Create()
+  $stream = [System.IO.File]::OpenRead($path)
+  try {{
+    ($sha.ComputeHash($stream) | ForEach-Object {{ $_.ToString('x2') }}) -join ''
+  }} finally {{
+    $stream.Dispose()
+    $sha.Dispose()
+  }}
+}}"#,
+            path = ps_quote(&path.to_string_lossy())
+        );
+        let actual = self
+            .ps(&script, true, Some(180))?
+            .trim()
+            .to_ascii_lowercase();
+        if actual != expected {
+            return Err(HyperVError::Config(format!(
+                "SHA512 mismatch for {}: expected {}, got {}",
                 path.display(),
                 expected,
                 actual

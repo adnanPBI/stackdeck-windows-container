@@ -55,7 +55,7 @@ cd <repo-root>
 .\scripts\windows\06-Diagnostics.ps1 -PystackExe .\target\release\pystack.exe -Config stack.json -Output .pystack\diagnostics -Tail 200
 ```
 
-One-command path: `.\scripts\windows\Invoke-PyStackLocalDeploy.ps1 -Phase All -SmbPassword "<password>" -SkipDesktop` (`-Sha256` is optional).
+One-command path: `.\scripts\windows\Invoke-PyStackLocalDeploy.ps1 -Phase All -SmbPassword "<password>" -SkipDesktop` (`-Sha512` is optional for the default Debian image; `-Sha256` remains supported for providers that publish SHA-256).
 
 ### Hard prerequisites for the runtime (not for build/test)
 
@@ -63,7 +63,7 @@ One-command path: `.\scripts\windows\Invoke-PyStackLocalDeploy.ps1 -Phase All -S
 - Hyper-V enabled (`Microsoft-Hyper-V-All`); `Get-VM`/`Resize-VHD` cmdlets present.
 - `qemu-img` — required for the default Debian `.qcow2` path. The backend also looks in `C:\Program Files\qemu\qemu-img.exe` when it is not on `PATH`. A pre-converted `.vhdx` passed via `--image-vhdx` avoids conversion.
 - `oscdimg` (Windows ADK) or `genisoimage` are optional accelerators for the cloud-init seed ISO. If neither exists, the backend falls back to Windows IMAPI2 and still creates the seed ISO.
-- Official Ubuntu cloud-image SHA-256 and the operator's Windows SMB password.
+- Official Debian cloud-image SHA-512, or provider SHA-256 for non-default images, and the operator's Windows SMB password.
 
 ### Security posture (do not change without thought)
 

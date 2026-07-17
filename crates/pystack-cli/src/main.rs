@@ -278,6 +278,8 @@ enum HypervCommands {
         output: String,
         #[arg(long, default_value = "")]
         sha256: String,
+        #[arg(long, default_value = "")]
+        sha512: String,
         #[arg(long)]
         force: bool,
     },
@@ -290,6 +292,8 @@ enum HypervCommands {
         url: Option<String>,
         #[arg(long)]
         sha256: Option<String>,
+        #[arg(long)]
+        sha512: Option<String>,
         #[arg(long, default_value_t = 300)]
         timeout: u32,
     },
@@ -2274,10 +2278,17 @@ fn run_hyperv_command(cmd: HypervCommands) -> Result<()> {
             image_vhdx,
             url,
             sha256,
+            sha512,
             timeout,
         } => {
             println!("Initializing Hyper-V runtime...");
-            mgr.init_vm(&image_vhdx, url.as_deref(), sha256.as_deref(), timeout)?;
+            mgr.init_vm(
+                &image_vhdx,
+                url.as_deref(),
+                sha256.as_deref(),
+                sha512.as_deref(),
+                timeout,
+            )?;
         }
         HypervCommands::CreateVm { iso } => {
             println!("Creating VM...");
@@ -2296,6 +2307,7 @@ fn run_hyperv_command(cmd: HypervCommands) -> Result<()> {
             url,
             output,
             sha256,
+            sha512,
             force,
         } => {
             println!("Downloading image...");
@@ -2306,6 +2318,11 @@ fn run_hyperv_command(cmd: HypervCommands) -> Result<()> {
                     None
                 } else {
                     Some(&sha256)
+                },
+                if sha512.is_empty() {
+                    None
+                } else {
+                    Some(&sha512)
                 },
                 force,
             )?;

@@ -91,12 +91,12 @@ The VHDX is configured as a small 10 GB virtual disk. Hyper-V dynamic VHDX grows
 
 ## Phase 4: initialize the VM
 
-Use an official Ubuntu cloud image SHA-256 from the image provider.
+The default runtime image is Debian genericcloud. Use the official SHA-512 from Debian's `SHA512SUMS` file, or SHA-256 when using another provider that publishes it.
 
 ```powershell
 .\scripts\windows\03-Init-HyperV-Runtime.ps1 `
   -PystackExe .\target\release\pystack.exe `
-  -Sha256 "<official-image-sha256>" `
+  -Sha512 "<official-image-sha512>" `
   -Timeout 900
 ```
 
@@ -105,7 +105,7 @@ The init flow:
 ```text
 1. Ensures SSH key
 2. Downloads cloud image
-3. Verifies SHA-256
+3. Verifies SHA-512 or SHA-256 when provided
 4. Converts image to dynamic VHDX if needed
 5. Generates cloud-init seed ISO
 6. Creates Hyper-V VM
@@ -157,7 +157,7 @@ C:\ProgramData\PyStack\config\docker-api-token.txt
 ```powershell
 .\scripts\windows\Invoke-PyStackLocalDeploy.ps1 `
   -Phase All `
-  -Sha256 "<official-image-sha256>" `
+  -Sha512 "<official-image-sha512>" `
   -SmbPassword "<your-windows-password>" `
   -SkipDesktop
 ```

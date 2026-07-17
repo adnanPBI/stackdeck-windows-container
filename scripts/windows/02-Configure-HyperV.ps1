@@ -14,6 +14,13 @@ param(
 $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force -Path $VmRoot | Out-Null
 
+function Invoke-Pystack {
+  & $PystackExe @args
+  if ($LASTEXITCODE -ne 0) {
+    throw "pystack command failed with exit code ${LASTEXITCODE}: $($args -join ' ')"
+  }
+}
+
 $args = @(
   "hyperv", "configure",
   "--vm-name", $VmName,
@@ -27,6 +34,6 @@ $args = @(
   "--smb-user", $SmbUser
 )
 if ($SmbPassword) { $args += @("--smb-password", $SmbPassword) }
-& $PystackExe @args
-& $PystackExe hyperv ensure-key
-& $PystackExe hyperv doctor
+Invoke-Pystack @args
+Invoke-Pystack hyperv ensure-key
+Invoke-Pystack hyperv doctor

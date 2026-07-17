@@ -120,15 +120,16 @@ Generate or confirm the SSH key:
 pystack hyperv ensure-key
 ```
 
-Initialize from the default Debian cloud image. Pass `-Sha256` if you want explicit checksum verification:
+Initialize from the default Debian cloud image. Pass `--sha512` with the value from Debian's `SHA512SUMS` if you want explicit checksum verification:
 
 ```powershell
 pystack hyperv init `
   --url "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2" `
+  --sha512 "<official-image-sha512>" `
   --timeout 900
 ```
 
-The init flow downloads the image, verifies SHA-256, converts to dynamic VHDX when needed, creates cloud-init seed ISO, creates the Hyper-V VM, discovers IP, waits for SSH, and bootstraps containerd/nerdctl.
+The init flow downloads the image, verifies SHA-512 or SHA-256 when provided, converts to dynamic VHDX when needed, creates cloud-init seed ISO, creates the Hyper-V VM, discovers IP, waits for SSH, and bootstraps containerd/nerdctl.
 
 ## SMB live bind mounts
 

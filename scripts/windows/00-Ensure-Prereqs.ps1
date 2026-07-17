@@ -41,7 +41,7 @@ function Check-QemuImg {
       return [pscustomobject]@{ Check = "qemu-img"; Status = "OK"; Detail = $candidate }
     }
   }
-  [pscustomobject]@{ Check = "qemu-img"; Status = "MISSING"; Detail = "Required for the default Ubuntu .img path; provide --image-vhdx to avoid conversion" }
+  [pscustomobject]@{ Check = "qemu-img"; Status = "MISSING"; Detail = "Required for the default Debian .qcow2 path; provide --image-vhdx to avoid conversion" }
 }
 
 $results = New-Object System.Collections.Generic.List[object]
@@ -95,5 +95,5 @@ $results | Format-Table -AutoSize
 
 $bad = $results | Where-Object { $_.Status -in @("MISSING", "Disabled") -and $_.Check -notin @("oscdimg", "oscdimg.exe", "genisoimage") }
 if ($bad) {
-  Write-Error "Preflight failed. Fix missing required items above. The default Ubuntu .img path requires qemu-img; oscdimg/genisoimage are optional because the runtime has an IMAPI2 ISO fallback."
+  Write-Error "Preflight failed. Fix missing required items above. The default Debian .qcow2 path requires qemu-img; oscdimg/genisoimage are optional because the runtime has an IMAPI2 ISO fallback."
 }
