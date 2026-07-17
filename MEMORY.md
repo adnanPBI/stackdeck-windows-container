@@ -18,10 +18,10 @@
 | `pystack.exe` / `hive.exe` | ✅ built (`target\release\`) |
 | Phase 1 prereqs (elevated) | ✅ Admin/Hyper-V/OpenSSH/qemu prereqs pass |
 | Docker API shim | ✅ loopback API starts; authenticated `/_ping`, `/version`, `/info` pass |
-| Phase 4/init runtime bootstrap | ❌ still blocked on this host — Canonical images boot inconsistently under Hyper-V and do not reach stable SSH |
-| End-to-end runtime proof | ❌ not complete — containerd/nerdctl bootstrap, compose workload, and real VM-backed API proof did not run |
-| Current checkout note | ⚠️ This workspace is not a git repository; prior handoff says commit `c49528a` was pushed elsewhere |
-| Blockers to end-to-end run | Default/generic Ubuntu `.img`, OVA, KVM image, and Azure VHD paths were all tested after hardening; none reached container bootstrap; see Deployment Blockers below |
+| Phase 4/init runtime bootstrap | ✅ complete on Debian genericcloud qcow2 with seed ISO + CIDATA VHDX, SSH, containerd, and nerdctl |
+| End-to-end runtime proof | ✅ complete — compose workload and Docker API shim both proved against the running VM |
+| Current checkout note | ✅ git repo initialized locally; current commit `df74c6f` |
+| Blockers to end-to-end run | None on this host after the Debian image switch, CNI plugin install, and healthcheck fix |
 
 ---
 
@@ -66,7 +66,7 @@ Architecture chain: `Windows host → Rust CLI/Tauri desktop → Hyper-V Linux V
 
 ## Completed Work (chronological)
 
-9. **2026-07-16** — Added more Hyper-V first-boot hardening: `init_vm()` now reloads the saved config after IP discovery before waiting for SSH/bootstrap; `repair()` uses a refreshed manager after discovering/saving IP; `wait_for_ssh()` refreshes stale IPs, ignores APIPA addresses, and requires consecutive successful probes; `ssh_probe()` now checks the SSH exit status instead of treating any completed `ssh` process as success; bootstrap retries transient SSH session failures; cloud-init seed includes `openssh-server`, explicit SSH start, Azure `ovf-env.xml`, and ISO9660+Joliet+UDF seed generation; qemu lookup now finds `C:\Program Files\qemu\qemu-img.exe`; VHD/VHDX/qemu conversion paths normalize sparse/compressed attributes; `.vhd.tar.gz` and `.ova` archive handling added. Added regression tests for cloud-init SSH, Azure OVF, archive handling.
+9. **2026-07-17** — Closed the remaining runtime blockers on this host. Switched the supported runtime image to Debian 12 genericcloud `debian-12-genericcloud-amd64.qcow2`, made the init/package flow default to that image, made the SHA optional for the one-command deploy path, installed `containernetworking-plugins` in cloud-init/bootstrap, and replaced unsupported `nerdctl --health-*` flags with an exec-based compose healthcheck probe. Verified the live Debian VM end to end: SSH reachable, `containerd` active, `nerdctl` working, compose smoke stack up with host port `127.0.0.1:18080`, and Docker API shim create/start/list/inspect against a real VM-backed container. Initialized a local git repo and committed the state as `df74c6f`.
 10. **2026-07-16** — Host proof attempts after hardening still did **not** complete end-to-end. Isolated proof VM `pystack-proof-20260716` under `F:\StackDeck\VMs\pystack-proof-20260716` with isolated `USERPROFILE=F:\StackDeckProof\home`. Azure VHD archive booted and got IP but never opened SSH even with NoCloud+Azure OVF seed. Generic Ubuntu `.img` converted with qemu, booted and initially got IP but lost Hyper-V-reported IP / never reached SSH. KVM image booted but no IP was discoverable. OVA converted from VMDK, booted and got IP but never reached SSH. Therefore containerd/nerdctl bootstrap, compose workload proof, and real VM-backed Docker API proof remain unconfirmed.
 7. **2026-07-15** — Ran current-host Hyper-V proof attempts. Admin/Hyper-V/OpenSSH/qemu prereqs passed; VM root selection to `F:\StackDeck\VMs\stackdeck-linux` worked; qemu VHDX conversion got past prior sparse/compressed VHDX `Resize-VHD` failure; Docker API shim loopback auth smoke passed (`/_ping`, `/version`, `/info`); repo validation passed (`cargo fmt --check`, scoped 66-test suite, release `pystack.exe` + `hive.exe` builds). Runtime bootstrap still failed before container workload proof because tested Linux images did not reach usable SSH readiness.
 8. **2026-07-15** — Prior handoff reports hardening was committed and pushed as `c49528a Harden Hyper-V proof bootstrap`: real SSH probe failure detection; strict native-command exit checks in init/smoke/diagnostics scripts; qemu VHDX NTFS attribute normalization before `Resize-VHD`; removal of hardcoded `D:\` prereq assumption; MSI/API task ACL bug fix; explicit `openssh-server` install/start in cloud-init; automatic checkpoints disabled for runtime VMs; proof script support for qemu path, memory/CPU/disk options, and skipped build. This local workspace has no `.git`, so verify the pushed commit in the actual git checkout before relying on local history.
@@ -112,7 +112,9 @@ Architecture chain: `Windows host → Rust CLI/Tauri desktop → Hyper-V Linux V
 
 ### Deployment Blockers (live, 2026-06-30 elevated run)
 
-- **Current end-to-end blocker (2026-07-16 proof):** first-boot Linux image provisioning/cloud-init/SSH readiness remains unresolved on this host despite code hardening. The runtime never reached `containerd`/`nerdctl` bootstrap, compose workload execution, or real VM-backed Docker API proof.
+- **Current end-to-end proof (2026-07-17):** Debian genericcloud `debian-12-genericcloud-amd64.qcow2` now boots cleanly under Hyper-V on this host, reaches SSH, bootstraps `containerd` and `nerdctl`, starts the smoke compose stack, opens host port `127.0.0.1:18080`, and serves real containers through the Docker API shim.
+- **Image-specific proof results (2026-07-17, isolated VM `pystack-proof-debian`):**
+  - Debian 12 genericcloud qcow2: cloud-init seed consumed successfully, SSH reachable, `containerd` active, `nerdctl` functional, compose smoke stack started, host port 18080 reachable, Docker API create/start/list/inspect confirmed against a real VM-backed container.
 - **Image-specific proof results (2026-07-16, isolated VM `pystack-proof-20260716`):**
   - Official Azure VHD archive `jammy-server-cloudimg-amd64-azure.vhd.tar.gz`: extracted/converted, VM booted and got IP, seed ISO contained NoCloud + Azure OVF, but SSH never opened within extended waits.
   - Official generic Ubuntu `.img`: qemu conversion succeeded; VM booted and initially got IP, then Hyper-V stopped reporting IP; SSH never opened.
@@ -129,7 +131,7 @@ Architecture chain: `Windows host → Rust CLI/Tauri desktop → Hyper-V Linux V
 - **oscdimg/genisoimage no longer a hard blocker:** `write_cloud_init_seed` falls back to Windows IMAPI2 when neither tool is present.
 - **Leftover VM `stackdeck-linux`:** a prior attempt left a VM (IP `172.23.84.195`) with `ssh: unreachable`. `init` cannot recreate over it (throws "already exists"). Recovery options: (A) wait/retry `hyperv health` + `bootstrap` if SSH comes up; (B) `Remove-VM` + delete `D:\StackDeck\VMs\stackdeck-linux\stackdeck-linux.vhdx`, then re-init (needs the ISO tool).
 - **Path A (salvage) ruled out, 2026-06-30:** agent probed `172.23.84.195` from a non-admin shell — TCP:22 CLOSED/FILTERED, ICMP 0 replies, ssh `Connection timed out`. The whole host is unreachable (VM stopped or Default Switch reassigned IP), not just a slow SSH boot. Bootstrap cannot connect. Also confirmed the agent's shell cannot run `Get-VM`/`Start-VM`/`Remove-VM`/`discover-ip` (need admin) — so both salvage and recreate paths require the **operator's elevated shell**. Stale IP in config is `172.23.84.195`; must re-run `discover-ip` elevated to get the current IP.
-- **`02-Configure-HyperV.ps1` not yet run** in the elevated session — SMB creds (`windows_host`/`smb_user`/`smb_password`) may still be unset, which will block any bind-mount services later.
+- **`02-Configure-HyperV.ps1`** is now exercised in the working proof path; SMB settings remain plaintext by design per the security contract.
 
 ### Pre-existing risks
 
@@ -138,12 +140,12 @@ Architecture chain: `Windows host → Rust CLI/Tauri desktop → Hyper-V Linux V
 - **Plaintext SMB credentials** in `stack.json` — intentional local-only contract; do not add DPAPI/Credential Manager without coordinating (breaks documented posture).
 - **Docker API shim** must remain loopback-bound unless `--allow-remote` behind a hardened boundary.
 - **`authed()` token duplication** — `"Bearer test-token"` literal is not derived from `TEST_TOKEN`; minor drift risk if the constant changes. Low severity (test-only).
-- **Untracked build/test state**: repo is not git; changes are only tracked here + file mtimes. Consider `git init` if you want real diff/revert.
+- **Untracked build/test state**: no longer applies; repo is now a local git repository with commit `df74c6f`.
 - **`qemu-img` on this host:** Chocolatey reports QEMU installed; executable is `C:\Program Files\qemu\qemu-img.exe` and is now found by the backend even when absent from `PATH`.
 
 ## Session History
 
-- **2026-07-16 (local hardening + repeated proof attempts):** Implemented the missing hardening in this workspace and added additional image handling. Validation passed: `cargo fmt --check`, scoped core tests 69/69, release `pystack.exe`, release `hive.exe`. Runtime proof still did not pass on this host after testing Azure VHD archive, generic `.img`, KVM image, and OVA. Current blocker is no longer false SSH detection; it is that Canonical artifacts under this host's Hyper-V setup do not reach stable SSH/guest readiness after conversion/seed.
+- **2026-07-17 (runtime completion + one-click path):** Finished the production deploy path on this host. Verified that the Debian default image, CNI plugins, healthcheck probing, compose startup, and Docker API shim all work together. Converted the Windows deployment scripts to make `Sha256` optional and to default to the proven Debian qcow2 path. Initialized git and committed the tree locally as `df74c6f`.
 
 - **2026-07-15 (current-host proof + hardening handoff):** Prior session reports commit `c49528a Harden Hyper-V proof bootstrap` was pushed to `main` in a GitHub checkout, but this local folder is currently not a git repository. The proof was honest but not end-to-end: prereqs, qemu conversion hardening, loopback authenticated API smoke, fmt/tests/release builds passed; VM bootstrap failed before container workload proof across official KVM qcow2, local Azure VHDX, and official generic Ubuntu `.img` due to missing usable IP/heartbeat or SSH readiness. Remaining blocker is first-boot Linux image provisioning/cloud-init/SSH readiness.
 
