@@ -4487,9 +4487,11 @@ dependencies = [
 name = "pystack-types"
 version = "0.5.0"
 dependencies = [
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

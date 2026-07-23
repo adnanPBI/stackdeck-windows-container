@@ -90,11 +90,8 @@ impl HyperVManager {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(config)?;
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(json.as_bytes())?;
-        std::fs::rename(&tmp, &path)?;
+        pystack_types::atomic_write(&path, json.as_bytes())?;
         Ok(())
     }
 
@@ -1466,12 +1463,13 @@ if ($dnsIp) {{
                     port
                 )));
             }
-            if let Some((_, host_port, container_port)) = parse_port(port) {
-                args.extend([
-                    "-p".to_string(),
-                    format!("{}:{}", host_port, container_port),
-                ]);
+            if let Some(publish) = nerdctl_publish_arg(port) {
+                args.extend(["-p".to_string(), publish]);
             }
+        }
+
+        if let Some(hc) = &svc.healthcheck {
+            args.extend(nerdctl_health_args(hc));
         }
 
         for volume in &svc.volumes {
@@ -1500,12 +1498,12 @@ if ($dnsIp) {{
         let cmd_str = nerdctl_command(cfg, &args);
         let result = self.ssh(&cmd_str, true)?;
 
-        // Inject healthcheck waiting loop
+        // Wait for container-native health state when Compose healthchecks are present.
         if let Some(hc) = &svc.healthcheck {
             if hc.test.is_some() && hc.r#type != "none" {
-                let Some(cmd) = hc.test.as_ref().and_then(compose_health_command) else {
+                if hc.test.as_ref().and_then(compose_health_command).is_none() {
                     return Ok(result);
-                };
+                }
                 println!("{}: waiting for healthcheck...", svc.name);
                 let cname = container_name(&svc.project, &svc.name);
                 let max_duration = std::time::Duration::from_secs(
@@ -1514,33 +1512,19 @@ if ($dnsIp) {{
                         + 10) as u64,
                 );
                 let start_time = std::time::Instant::now();
-                let mut consecutive_successes = 0;
 
                 while start_time.elapsed() < max_duration {
-                    let check_args = vec![
-                        "exec".to_string(),
-                        cname.clone(),
-                        "sh".to_string(),
-                        "-lc".to_string(),
-                        cmd.clone(),
-                    ];
-                    let check_cmd = nerdctl_command(cfg, &check_args);
-                    if self.ssh(&check_cmd, false).is_ok() {
-                        consecutive_successes += 1;
-                        if consecutive_successes >= 2 {
-                            break;
-                        }
-                    } else {
-                        consecutive_successes = 0;
+                    match self.container_health_status(&cname)?.as_str() {
+                        "healthy" => return Ok(result),
+                        "unhealthy" => break,
+                        _ => {}
                     }
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
-                if consecutive_successes < 2 {
-                    return Err(HyperVError::Ssh(format!(
-                        "{}: healthcheck failed or timed out",
-                        svc.name
-                    )));
-                }
+                return Err(HyperVError::Ssh(format!(
+                    "{}: healthcheck failed or timed out",
+                    svc.name
+                )));
             }
         }
 
@@ -1643,16 +1627,7 @@ if ($dnsIp) {{
 
         let cname = container_name(&svc.project, &svc.name);
         let _ = self.remove_portproxy(svc);
-        let res = self.ssh(&nerdctl_command(&self.config, &["rm", "-f", &cname]), false);
-
-        // Also ensure any leftover processes binding to the ports are killed
-        for port in &svc.ports {
-            if let Some((_, host_port, _)) = parse_port(port) {
-                let script = format!("sudo fuser -k -9 {}/tcp || true", host_port);
-                let _ = self.ssh(&script, false);
-            }
-        }
-        res
+        self.ssh(&nerdctl_command(&self.config, &["rm", "-f", &cname]), false)
     }
 
     /// List containers.
@@ -1717,12 +1692,8 @@ if ($dnsIp) {{
                         .unwrap_or(if running { "running" } else { "stopped" })
                         .to_string();
 
-                    if let Some(health_status) =
-                        state.pointer("/Health/Status").and_then(|v| v.as_str())
-                    {
-                        if health_status == "unhealthy" {
-                            status = "unhealthy".to_string();
-                        }
+                    if let Some(health_status) = container_health_from_state(&state) {
+                        status = health_status.to_string();
                     }
 
                     let exit_code = state.get("ExitCode").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -1764,7 +1735,7 @@ if ($dnsIp) {{
             return Ok("unknown".to_string());
         };
         let state = item.get("State").cloned().unwrap_or_default();
-        if let Some(status) = state.pointer("/Health/Status").and_then(|v| v.as_str()) {
+        if let Some(status) = container_health_from_state(&state) {
             return Ok(status.to_string());
         }
         let running = state
@@ -1794,7 +1765,7 @@ if ($dnsIp) {{
             args.push("-f".to_string());
         }
         args.extend(images.iter().map(|s| s.to_string()));
-        self.ssh(&nerdctl_command(&self.config, &args), false)
+        self.ssh(&nerdctl_command(&self.config, &args), true)
     }
 
     // -----------------------------------------------------------------------
@@ -1821,7 +1792,7 @@ if ($dnsIp) {{
             args.push("-f".to_string());
         }
         args.extend(volumes.iter().map(|s| s.to_string()));
-        self.ssh(&nerdctl_command(&self.config, &args), false)
+        self.ssh(&nerdctl_command(&self.config, &args), true)
     }
 
     // -----------------------------------------------------------------------
@@ -1848,7 +1819,7 @@ if ($dnsIp) {{
             .chain(networks.iter())
             .map(|s| s.to_string())
             .collect();
-        self.ssh(&nerdctl_command(&self.config, &args), false)
+        self.ssh(&nerdctl_command(&self.config, &args), true)
     }
 
     // -----------------------------------------------------------------------
@@ -2131,6 +2102,40 @@ fn compose_health_command(test: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn nerdctl_health_args(hc: &pystack_types::HealthCheck) -> Vec<String> {
+    if hc.r#type == "none" {
+        return Vec::new();
+    }
+    let Some(command) = hc.test.as_ref().and_then(compose_health_command) else {
+        return Vec::new();
+    };
+
+    let mut args = vec!["--health-cmd".to_string(), command];
+    args.extend([
+        "--health-interval".to_string(),
+        format!("{}s", hc.interval_seconds.max(1)),
+    ]);
+    args.extend([
+        "--health-timeout".to_string(),
+        format!("{}s", hc.timeout_seconds.max(1)),
+    ]);
+    args.extend([
+        "--health-retries".to_string(),
+        hc.retries.max(1).to_string(),
+    ]);
+    if hc.start_period_seconds > 0 {
+        args.extend([
+            "--health-start-period".to_string(),
+            format!("{}s", hc.start_period_seconds),
+        ]);
+    }
+    args
+}
+
+fn container_health_from_state(state: &serde_json::Value) -> Option<&str> {
+    state.pointer("/Health/Status").and_then(|v| v.as_str())
+}
+
 fn is_udp_port(port: &str) -> bool {
     port.trim().to_ascii_lowercase().ends_with("/udp")
 }
@@ -2169,6 +2174,11 @@ pub fn parse_port(port: &str) -> Option<(String, u16, u16)> {
             Some((ip, host, container))
         }
     }
+}
+
+fn nerdctl_publish_arg(port: &str) -> Option<String> {
+    let (host_ip, host_port, container_port) = parse_port(port)?;
+    Some(format!("{host_ip}:{host_port}:{container_port}"))
 }
 
 struct VolumeSpec {
@@ -2589,6 +2599,62 @@ mod tests {
             parse_port("\"8080:80\""),
             Some(("127.0.0.1".to_string(), 8080, 80))
         );
+    }
+
+    #[test]
+    fn test_nerdctl_publish_arg_preserves_host_ip() {
+        assert_eq!(
+            nerdctl_publish_arg("127.0.0.1:8080:80").as_deref(),
+            Some("127.0.0.1:8080:80")
+        );
+        assert_eq!(
+            nerdctl_publish_arg("0.0.0.0:8080:80").as_deref(),
+            Some("0.0.0.0:8080:80")
+        );
+        assert_eq!(
+            nerdctl_publish_arg("8080:80").as_deref(),
+            Some("127.0.0.1:8080:80")
+        );
+    }
+
+    #[test]
+    fn test_nerdctl_health_args_use_container_native_healthcheck() {
+        let hc = pystack_types::HealthCheck {
+            r#type: "command".into(),
+            test: Some(serde_json::json!([
+                "CMD-SHELL",
+                "curl -fsS http://localhost || exit 1"
+            ])),
+            interval_seconds: 5,
+            timeout_seconds: 3,
+            retries: 4,
+            start_period_seconds: 10,
+            ..Default::default()
+        };
+
+        let args = nerdctl_health_args(&hc);
+
+        assert_eq!(args[0], "--health-cmd");
+        assert_eq!(args[1], "curl -fsS http://localhost || exit 1");
+        assert!(args.windows(2).any(|w| w == ["--health-interval", "5s"]));
+        assert!(args.windows(2).any(|w| w == ["--health-timeout", "3s"]));
+        assert!(args.windows(2).any(|w| w == ["--health-retries", "4"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--health-start-period", "10s"]));
+    }
+
+    #[test]
+    fn test_container_health_from_state_reports_healthy_status() {
+        let state = serde_json::json!({
+            "Status": "running",
+            "Running": true,
+            "Health": {
+                "Status": "healthy"
+            }
+        });
+
+        assert_eq!(container_health_from_state(&state), Some("healthy"));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     path::{Path as StdPath, PathBuf},
-    sync::{LazyLock, Mutex},
+    sync::{LazyLock, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::net::TcpListener;
@@ -29,6 +29,12 @@ pub const API_VERSION: &str = "1.43";
 pub const MIN_API_VERSION: &str = "1.24";
 const PROJECT: &str = "docker-api";
 static STATE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+fn state_lock() -> Result<MutexGuard<'static, ()>, ApiError> {
+    STATE_LOCK
+        .lock()
+        .map_err(|_| ApiError::BlockingTask("Docker API state lock is poisoned".to_string()))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -345,6 +351,7 @@ async fn networks_json() -> Result<impl IntoResponse, ApiError> {
 }
 
 async fn network_create(Json(spec): Json<Value>) -> Result<impl IntoResponse, ApiError> {
+    validate_network_create_spec(&spec)?;
     let name = spec
         .get("Name")
         .and_then(|v| v.as_str())
@@ -376,6 +383,7 @@ async fn volumes_json() -> Result<impl IntoResponse, ApiError> {
 }
 
 async fn volume_create(Json(spec): Json<Value>) -> Result<impl IntoResponse, ApiError> {
+    validate_volume_create_spec(&spec)?;
     let name = spec
         .get("Name")
         .and_then(|v| v.as_str())
@@ -404,6 +412,25 @@ async fn volume_remove(
 
 fn manager() -> Result<HyperVManager, ApiError> {
     Ok(HyperVManager::new(HyperVManager::load_config()?))
+}
+
+fn map_nerdctl_not_found<T>(
+    result: Result<T, pystack_hyperv::HyperVError>,
+    kind: &str,
+    name: &str,
+) -> Result<T, ApiError> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(pystack_hyperv::HyperVError::Ssh(message)) if is_not_found_message(&message) => {
+            Err(ApiError::NotFound(format!("No such {kind}: {name}")))
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn is_not_found_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("not found") || message.contains("no such")
 }
 
 async fn blocking<F, T>(f: F) -> Result<T, ApiError>
@@ -448,9 +475,8 @@ fn write_state(state: &ApiState) -> Result<(), ApiError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension(format!("json.{}.tmp", new_id()));
-    std::fs::write(&tmp, serde_json::to_string_pretty(state)?)?;
-    std::fs::rename(tmp, path)?;
+    let json = serde_json::to_string_pretty(state)?;
+    pystack_types::atomic_write(&path, json.as_bytes())?;
     Ok(())
 }
 
@@ -680,17 +706,41 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn state_match(identifier: &str) -> Option<(String, ContainerMeta)> {
+fn state_matches(identifier: &str) -> Vec<(String, ContainerMeta)> {
     let ident = identifier.trim_start_matches('/');
-    read_state().containers.into_iter().find(|(cid, meta)| {
-        cid.starts_with(ident) || meta.name == ident || meta.runtime_name == ident
-    })
+    if ident.is_empty() {
+        return Vec::new();
+    }
+    read_state()
+        .containers
+        .into_iter()
+        .filter(|(cid, meta)| {
+            cid.starts_with(ident) || meta.name == ident || meta.runtime_name == ident
+        })
+        .collect()
 }
 
-fn container_ref(identifier: &str) -> String {
-    state_match(identifier)
+fn state_match(identifier: &str) -> Result<Option<(String, ContainerMeta)>, ApiError> {
+    let ident = identifier.trim_start_matches('/');
+    let mut matches = state_matches(identifier);
+    if matches.len() > 1 {
+        matches.sort_by(|a, b| a.0.cmp(&b.0));
+        let candidates = matches
+            .iter()
+            .map(|(id, meta)| format!("{} ({})", &id[..12.min(id.len())], meta.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ApiError::BadRequest(format!(
+            "ambiguous container reference \"{ident}\" matches: {candidates}"
+        )));
+    }
+    Ok(matches.pop())
+}
+
+fn container_ref(identifier: &str) -> Result<String, ApiError> {
+    Ok(state_match(identifier)?
         .map(|(_, meta)| meta.runtime_name)
-        .unwrap_or_else(|| identifier.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| identifier.trim_start_matches('/').to_string()))
 }
 
 fn service_from_meta(meta: &ContainerMeta) -> HyperVService {
@@ -714,7 +764,146 @@ fn service_from_meta(meta: &ContainerMeta) -> HyperVService {
     }
 }
 
+fn validate_create_spec(spec: &Value) -> Result<(), ApiError> {
+    let Some(obj) = spec.as_object() else {
+        return Err(ApiError::BadRequest(
+            "container create body must be a JSON object".to_string(),
+        ));
+    };
+    for (key, value) in obj {
+        match key.as_str() {
+            "Image" | "Cmd" | "Env" | "ExposedPorts" => {}
+            "HostConfig" => validate_host_config(value)?,
+            _ if value_has_semantics(value) => {
+                return Err(unsupported_create_field(&format!("Container.{key}")));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_host_config(value: &Value) -> Result<(), ApiError> {
+    let Some(obj) = value.as_object() else {
+        if value_has_semantics(value) {
+            return Err(ApiError::BadRequest(
+                "HostConfig must be a JSON object when provided".to_string(),
+            ));
+        }
+        return Ok(());
+    };
+    for (key, value) in obj {
+        match key.as_str() {
+            "Binds" | "PortBindings" | "PublishAllPorts" => {}
+            "NetworkMode" => {
+                if let Some(mode) = value.as_str() {
+                    if !matches!(mode, "" | "default" | "bridge") {
+                        return Err(unsupported_create_field("HostConfig.NetworkMode"));
+                    }
+                } else if value_has_semantics(value) {
+                    return Err(unsupported_create_field("HostConfig.NetworkMode"));
+                }
+            }
+            "RestartPolicy" => validate_restart_policy(value)?,
+            _ if value_has_semantics(value) => {
+                return Err(unsupported_create_field(&format!("HostConfig.{key}")));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_restart_policy(value: &Value) -> Result<(), ApiError> {
+    let Some(obj) = value.as_object() else {
+        if value_has_semantics(value) {
+            return Err(unsupported_create_field("HostConfig.RestartPolicy"));
+        }
+        return Ok(());
+    };
+    let name = obj.get("Name").and_then(|v| v.as_str()).unwrap_or_default();
+    let retry_count = obj
+        .get("MaximumRetryCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_default();
+    if matches!(name, "" | "no") && retry_count == 0 {
+        Ok(())
+    } else {
+        Err(unsupported_create_field("HostConfig.RestartPolicy"))
+    }
+}
+
+fn validate_network_create_spec(spec: &Value) -> Result<(), ApiError> {
+    let Some(obj) = spec.as_object() else {
+        return Err(ApiError::BadRequest(
+            "network create body must be a JSON object".to_string(),
+        ));
+    };
+    for (key, value) in obj {
+        match key.as_str() {
+            "Name" => {}
+            "Driver" => {
+                if value
+                    .as_str()
+                    .is_some_and(|driver| !matches!(driver, "" | "bridge"))
+                {
+                    return Err(unsupported_create_field("Network.Driver"));
+                }
+            }
+            _ if value_has_semantics(value) => {
+                return Err(unsupported_create_field(&format!("Network.{key}")));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_volume_create_spec(spec: &Value) -> Result<(), ApiError> {
+    let Some(obj) = spec.as_object() else {
+        return Err(ApiError::BadRequest(
+            "volume create body must be a JSON object".to_string(),
+        ));
+    };
+    for (key, value) in obj {
+        match key.as_str() {
+            "Name" => {}
+            "Driver" => {
+                if value
+                    .as_str()
+                    .is_some_and(|driver| !matches!(driver, "" | "local"))
+                {
+                    return Err(unsupported_create_field("Volume.Driver"));
+                }
+            }
+            _ if value_has_semantics(value) => {
+                return Err(unsupported_create_field(&format!("Volume.{key}")));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn unsupported_create_field(field: &str) -> ApiError {
+    ApiError::BadRequest(format!(
+        "{field} is not supported by this Docker API shim; refusing to ignore requested semantics"
+    ))
+}
+
+fn value_has_semantics(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+
 fn create_container(spec: Value, name: &str) -> Result<Value, ApiError> {
+    validate_create_spec(&spec)?;
     let image = spec
         .get("Image")
         .and_then(|v| v.as_str())
@@ -751,7 +940,7 @@ fn create_container(spec: Value, name: &str) -> Result<Value, ApiError> {
         docker_spec: spec,
     };
 
-    let _guard = STATE_LOCK.lock().unwrap();
+    let _guard = state_lock()?;
     let mut state = read_state();
     if state
         .containers
@@ -768,11 +957,11 @@ fn create_container(spec: Value, name: &str) -> Result<Value, ApiError> {
 }
 
 fn start_container(identifier: &str) -> Result<(), ApiError> {
-    if let Some((_id, meta)) = state_match(identifier) {
+    if let Some((_id, meta)) = state_match(identifier)? {
         let output = manager()?.start_service(&service_from_meta(&meta), false)?;
         let runtime_id = output.lines().last().unwrap_or_default().trim();
         if !runtime_id.is_empty() {
-            let _guard = STATE_LOCK.lock().unwrap();
+            let _guard = state_lock()?;
             let mut state = read_state();
             if let Some(stored) = state.containers.get_mut(&meta.id) {
                 stored.runtime_id = Some(runtime_id.to_string());
@@ -782,22 +971,24 @@ fn start_container(identifier: &str) -> Result<(), ApiError> {
         return Ok(());
     }
     let mgr = manager()?;
-    let cmd = pystack_hyperv::nerdctl_command(mgr.config(), &["start", &container_ref(identifier)]);
+    let reference = container_ref(identifier)?;
+    let cmd = pystack_hyperv::nerdctl_command(mgr.config(), &["start", &reference]);
     mgr.ssh(&cmd, true)?;
     Ok(())
 }
 
 fn stop_container(identifier: &str) -> Result<(), ApiError> {
     let mgr = manager()?;
-    let cmd = pystack_hyperv::nerdctl_command(mgr.config(), &["stop", &container_ref(identifier)]);
-    mgr.ssh(&cmd, false)?;
+    let reference = container_ref(identifier)?;
+    let cmd = pystack_hyperv::nerdctl_command(mgr.config(), &["stop", &reference]);
+    mgr.ssh(&cmd, true)?;
     Ok(())
 }
 
 fn remove_container(identifier: &str) -> Result<(), ApiError> {
-    if let Some((id, meta)) = state_match(identifier) {
+    if let Some((id, meta)) = state_match(identifier)? {
         if meta.runtime_id.is_none() {
-            let _guard = STATE_LOCK.lock().unwrap();
+            let _guard = state_lock()?;
             let mut state = read_state();
             state.containers.remove(&id);
             write_state(&state)?;
@@ -805,13 +996,13 @@ fn remove_container(identifier: &str) -> Result<(), ApiError> {
         }
     }
 
-    let reference = container_ref(identifier);
+    let reference = container_ref(identifier)?;
     let mgr = manager()?;
     let cmd = pystack_hyperv::nerdctl_command(mgr.config(), &["rm", "-f", &reference]);
-    mgr.ssh(&cmd, false)?;
+    mgr.ssh(&cmd, true)?;
 
     let ident = identifier.trim_start_matches('/');
-    let _guard = STATE_LOCK.lock().unwrap();
+    let _guard = state_lock()?;
     let mut state = read_state();
     state.containers.retain(|cid, meta| {
         !(cid.starts_with(ident) || meta.name == ident || meta.runtime_name == reference)
@@ -822,27 +1013,28 @@ fn remove_container(identifier: &str) -> Result<(), ApiError> {
 
 fn container_logs_text(identifier: &str, tail: u32) -> Result<String, ApiError> {
     let mgr = manager()?;
-    Ok(mgr.logs(&container_ref(identifier), tail)?)
+    let tail = tail.to_string();
+    let reference = container_ref(identifier)?;
+    let cmd = pystack_hyperv::nerdctl_command(mgr.config(), &["logs", "--tail", &tail, &reference]);
+    Ok(map_nerdctl_not_found(
+        mgr.ssh(&cmd, true),
+        "container",
+        identifier,
+    )?)
 }
 
 fn inspect_raw(identifier: &str) -> Result<Value, ApiError> {
-    if let Some((id, meta)) = state_match(identifier) {
+    if let Some((id, meta)) = state_match(identifier)? {
         if meta.runtime_id.is_none() {
             return Ok(synthetic_inspect(&id, &meta, "created", false));
         }
     }
 
-    let reference = container_ref(identifier);
+    let reference = container_ref(identifier)?;
     let mgr = manager()?;
-    let cmd = format!(
-        "{} 2>/dev/null || true",
-        pystack_hyperv::nerdctl_command(mgr.config(), &["inspect", &reference])
-    );
-    let raw = mgr.ssh(&cmd, false)?;
+    let cmd = pystack_hyperv::nerdctl_command(mgr.config(), &["inspect", &reference]);
+    let raw = map_nerdctl_not_found(mgr.ssh(&cmd, true), "container", identifier)?;
     if raw.trim().is_empty() {
-        if let Some((id, meta)) = state_match(identifier) {
-            return Ok(synthetic_inspect(&id, &meta, "exited", false));
-        }
         return Err(ApiError::NotFound(format!(
             "No such container: {identifier}"
         )));
@@ -859,14 +1051,14 @@ fn inspect_raw(identifier: &str) -> Result<Value, ApiError> {
 
     if let Some(first) = parsed.as_array().and_then(|items| items.first()) {
         let mut item = fix_created(first.clone());
-        if let Some((_id, meta)) = match_runtime_meta(first).or_else(|| state_match(identifier)) {
+        if let Some((_id, meta)) = match_runtime_meta(first).or(state_match(identifier)?) {
             item = normalize_runtime_inspect(item, &meta);
         }
         return Ok(item);
     }
 
     let mut item = fix_created(parsed.clone());
-    if let Some((_id, meta)) = match_runtime_meta(&parsed).or_else(|| state_match(identifier)) {
+    if let Some((_id, meta)) = match_runtime_meta(&parsed).or(state_match(identifier)?) {
         item = normalize_runtime_inspect(item, &meta);
     }
     Ok(item)
@@ -975,17 +1167,19 @@ fn normalize_runtime_inspect(mut item: Value, meta: &ContainerMeta) -> Value {
 fn list_containers(include_all: bool) -> Result<Vec<Value>, ApiError> {
     let mut result = Vec::new();
     let mut seen = Vec::new();
+    let state_snapshot = read_state();
+    let can_return_local_created = include_all
+        && !state_snapshot.containers.is_empty()
+        && state_snapshot
+            .containers
+            .values()
+            .all(|meta| meta.runtime_id.is_none());
     let mgr = match manager() {
         Ok(mgr) => mgr,
-        Err(_err) if include_all => {
-            for (id, meta) in read_state().containers {
-                result.push(container_summary(&synthetic_inspect(
-                    &id, &meta, "created", false,
-                )));
-            }
-            return Ok(result);
+        Err(_err) if can_return_local_created => {
+            return Ok(local_created_container_summaries(state_snapshot));
         }
-        Err(_) => return Ok(result),
+        Err(err) => return Err(err),
     };
     let ps_args = if include_all {
         vec!["ps", "-a", "--quiet"]
@@ -994,21 +1188,17 @@ fn list_containers(include_all: bool) -> Result<Vec<Value>, ApiError> {
     };
     let raw = match mgr.ssh(
         &pystack_hyperv::nerdctl_command(mgr.config(), &ps_args),
-        false,
+        true,
     ) {
         Ok(raw) => raw,
-        Err(err) if include_all => {
-            tracing::debug!("falling back to synthetic container state: {err}");
-            String::new()
+        Err(_err) if can_return_local_created => {
+            return Ok(local_created_container_summaries(state_snapshot));
         }
-        Err(_err) => return Ok(result),
+        Err(err) => return Err(err.into()),
     };
     for reference in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let cmd = format!(
-            "{} 2>/dev/null || true",
-            pystack_hyperv::nerdctl_command(mgr.config(), &["inspect", reference])
-        );
-        let raw = mgr.ssh(&cmd, false)?;
+        let cmd = pystack_hyperv::nerdctl_command(mgr.config(), &["inspect", reference]);
+        let raw = map_nerdctl_not_found(mgr.ssh(&cmd, true), "container", reference)?;
         if raw.trim().is_empty() {
             continue;
         }
@@ -1054,7 +1244,7 @@ fn list_containers(include_all: bool) -> Result<Vec<Value>, ApiError> {
 
         let statuses = if !unseen_names.is_empty() {
             let names_refs: Vec<&str> = unseen_names.iter().map(|s| s.as_str()).collect();
-            mgr.inspect_containers(&names_refs).unwrap_or_default()
+            inspect_container_statuses(&mgr, &names_refs)?
         } else {
             std::collections::HashMap::new()
         };
@@ -1086,7 +1276,7 @@ fn list_containers(include_all: bool) -> Result<Vec<Value>, ApiError> {
         }
 
         if !phantom_ids.is_empty() {
-            let _guard = STATE_LOCK.lock().unwrap();
+            let _guard = state_lock()?;
             let mut state = read_state();
             let mut changed = false;
             for id in phantom_ids {
@@ -1098,6 +1288,73 @@ fn list_containers(include_all: bool) -> Result<Vec<Value>, ApiError> {
                 let _ = write_state(&state);
             }
         }
+    }
+    Ok(result)
+}
+
+fn local_created_container_summaries(state: ApiState) -> Vec<Value> {
+    state
+        .containers
+        .into_iter()
+        .map(|(id, meta)| container_summary(&synthetic_inspect(&id, &meta, "created", false)))
+        .collect()
+}
+
+fn inspect_container_statuses(
+    mgr: &HyperVManager,
+    names: &[&str],
+) -> Result<HashMap<String, Value>, ApiError> {
+    let mut result = HashMap::new();
+    for name in names {
+        let cmd = pystack_hyperv::nerdctl_command(mgr.config(), &["inspect", name]);
+        let raw = match map_nerdctl_not_found(mgr.ssh(&cmd, true), "container", name) {
+            Ok(raw) => raw,
+            Err(ApiError::NotFound(_)) => {
+                result.insert(
+                    (*name).to_string(),
+                    json!({"exists": false, "status": "stopped", "running": false}),
+                );
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        let parsed: Value = serde_json::from_str(&raw)?;
+        let Some(item) = parsed
+            .as_array()
+            .and_then(|items| items.first())
+            .or_else(|| parsed.as_object().map(|_| &parsed))
+        else {
+            result.insert(
+                (*name).to_string(),
+                json!({"exists": true, "status": "unknown", "running": false}),
+            );
+            continue;
+        };
+        let state = item.get("State").cloned().unwrap_or_default();
+        let running = state
+            .get("Running")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mut status = state
+            .get("Status")
+            .and_then(|v| v.as_str())
+            .unwrap_or(if running { "running" } else { "stopped" })
+            .to_string();
+        if let Some(health_status) = state.pointer("/Health/Status").and_then(|v| v.as_str()) {
+            if health_status == "unhealthy" {
+                status = "unhealthy".to_string();
+            }
+        }
+        let exit_code = state.get("ExitCode").and_then(|v| v.as_i64()).unwrap_or(0);
+        result.insert(
+            (*name).to_string(),
+            json!({
+                "exists": true,
+                "status": status,
+                "running": running,
+                "exit_code": exit_code,
+            }),
+        );
     }
     Ok(result)
 }
@@ -1221,7 +1478,7 @@ fn list_networks() -> Result<Vec<Value>, ApiError> {
             mgr.config(),
             &["network", "ls", "--format", "{{json .}}"],
         ),
-        false,
+        true,
     )?;
     Ok(raw.lines().filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok()).map(|row| {
         let name = row.get("Name").or_else(|| row.get("NetworkName")).and_then(|v| v.as_str()).unwrap_or_default();
@@ -1248,18 +1505,32 @@ fn create_network(name: &str) -> Result<Value, ApiError> {
 }
 
 fn inspect_network(name: &str) -> Result<Value, ApiError> {
-    let out = manager()?.network_inspect(&[name])?;
-    let parsed: Value = serde_json::from_str(&out).unwrap_or_else(|_| json!([]));
+    let mgr = manager()?;
+    let out = map_nerdctl_not_found(
+        mgr.ssh(
+            &pystack_hyperv::nerdctl_command(mgr.config(), &["network", "inspect", name]),
+            true,
+        ),
+        "network",
+        name,
+    )?;
+    let parsed: Value = serde_json::from_str(&out)?;
     if let Some(first) = parsed.as_array().and_then(|items| items.first()) {
         return Ok(first.clone());
     }
-    Ok(
-        json!({"Name": name, "Id": name, "Driver": "bridge", "Scope": "local", "Containers": {}, "Options": {}, "Labels": {}}),
-    )
+    Err(ApiError::NotFound(format!("No such network: {name}")))
 }
 
 fn remove_network(name: &str) -> Result<(), ApiError> {
-    manager()?.network_remove(&[name])?;
+    let mgr = manager()?;
+    map_nerdctl_not_found(
+        mgr.ssh(
+            &pystack_hyperv::nerdctl_command(mgr.config(), &["network", "rm", name]),
+            true,
+        ),
+        "network",
+        name,
+    )?;
     Ok(())
 }
 
@@ -1267,7 +1538,7 @@ fn list_volumes() -> Result<Value, ApiError> {
     let mgr = manager()?;
     let raw = mgr.ssh(
         &pystack_hyperv::nerdctl_command(mgr.config(), &["volume", "ls", "--format", "{{json .}}"]),
-        false,
+        true,
     )?;
     let volumes: Vec<Value> = raw.lines().filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok()).map(|row| {
         let name = row.get("Name").and_then(|v| v.as_str()).unwrap_or_default();
@@ -1287,18 +1558,32 @@ fn create_volume(name: &str) -> Result<Value, ApiError> {
 }
 
 fn inspect_volume(name: &str) -> Result<Value, ApiError> {
-    let out = manager()?.volume_inspect(&[name])?;
-    let parsed: Value = serde_json::from_str(&out).unwrap_or_else(|_| json!([]));
+    let mgr = manager()?;
+    let out = map_nerdctl_not_found(
+        mgr.ssh(
+            &pystack_hyperv::nerdctl_command(mgr.config(), &["volume", "inspect", name]),
+            true,
+        ),
+        "volume",
+        name,
+    )?;
+    let parsed: Value = serde_json::from_str(&out)?;
     if let Some(first) = parsed.as_array().and_then(|items| items.first()) {
         return Ok(first.clone());
     }
-    Ok(
-        json!({"Name": name, "Driver": "local", "Mountpoint": "", "Labels": {}, "Options": {}, "Scope": "local"}),
-    )
+    Err(ApiError::NotFound(format!("No such volume: {name}")))
 }
 
 fn remove_volume(name: &str) -> Result<(), ApiError> {
-    manager()?.volume_remove(&[name], false)?;
+    let mgr = manager()?;
+    map_nerdctl_not_found(
+        mgr.ssh(
+            &pystack_hyperv::nerdctl_command(mgr.config(), &["volume", "rm", name]),
+            true,
+        ),
+        "volume",
+        name,
+    )?;
     Ok(())
 }
 
@@ -1681,6 +1966,90 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn container_create_rejects_unsupported_active_fields() {
+        let _home = isolated_home();
+        for body in [
+            r#"{"Image":"alpine","Entrypoint":["/bin/sh"]}"#,
+            r#"{"Image":"alpine","HostConfig":{"Privileged":true}}"#,
+            r#"{"Image":"alpine","HostConfig":{"RestartPolicy":{"Name":"always"}}}"#,
+            r#"{"Image":"alpine","HostConfig":{"NetworkMode":"host"}}"#,
+        ] {
+            let response = app()
+                .oneshot(
+                    authed(Request::builder())
+                        .method(Method::POST)
+                        .uri("/v1.43/containers/create")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn state_match_rejects_ambiguous_prefixes() {
+        let _home = isolated_home();
+        let mut state = ApiState::default();
+        for (id, name) in [
+            ("aaaaaaaaaaaa11111111111111111111", "web"),
+            ("aaaaaaaaaaaa22222222222222222222", "worker"),
+        ] {
+            state.containers.insert(
+                id.to_string(),
+                ContainerMeta {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    runtime_name: format!("docker-api-{name}"),
+                    runtime_id: None,
+                    image: "alpine".to_string(),
+                    cmd: None,
+                    env: HashMap::new(),
+                    ports: Vec::new(),
+                    binds: Vec::new(),
+                    created: 1,
+                    docker_spec: json!({"Image":"alpine"}),
+                },
+            );
+        }
+        write_state(&state).unwrap();
+
+        let err = state_match("aaaaaaaaaaaa").unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(_)));
+        assert!(err.to_string().contains("ambiguous container reference"));
+    }
+
+    #[test]
+    fn state_write_replaces_existing_state_file() {
+        let _home = isolated_home();
+        let mut state = ApiState::default();
+        state.containers.insert(
+            "first".to_string(),
+            ContainerMeta {
+                id: "first".to_string(),
+                name: "first".to_string(),
+                runtime_name: "docker-api-first".to_string(),
+                runtime_id: None,
+                image: "alpine".to_string(),
+                cmd: None,
+                env: HashMap::new(),
+                ports: Vec::new(),
+                binds: Vec::new(),
+                created: 1,
+                docker_spec: json!({"Image":"alpine"}),
+            },
+        );
+        write_state(&state).unwrap();
+
+        state.containers.clear();
+        write_state(&state).unwrap();
+
+        assert!(read_state().containers.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn http_container_state_routes_preserve_docker_name_and_remove_with_204() {
         let _home = isolated_home();
         let create = app()
@@ -1772,8 +2141,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(default_list.status(), StatusCode::OK);
-        assert!(json_body(default_list).await.as_array().unwrap().is_empty());
+        assert_eq!(default_list.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         let all_list = app()
             .oneshot(
@@ -1789,5 +2157,55 @@ mod tests {
         let containers = json_body(all_list).await;
         assert_eq!(containers.as_array().unwrap().len(), 1);
         assert_eq!(containers[0]["Names"][0], "/web");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runtime_collection_routes_propagate_missing_backend_config() {
+        let _home = isolated_home();
+        for uri in [
+            "/v1.43/containers/json",
+            "/v1.43/volumes",
+            "/v1.43/networks",
+        ] {
+            let response = app()
+                .oneshot(
+                    authed(Request::builder())
+                        .method(Method::GET)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn volume_and_network_create_reject_unsupported_fields_before_backend() {
+        let _home = isolated_home();
+        for (uri, body) in [
+            (
+                "/v1.43/volumes/create",
+                r#"{"Name":"data","Driver":"local","Labels":{"team":"dev"}}"#,
+            ),
+            (
+                "/v1.43/networks/create",
+                r#"{"Name":"mesh","Driver":"bridge","Internal":true}"#,
+            ),
+        ] {
+            let response = app()
+                .oneshot(
+                    authed(Request::builder())
+                        .method(Method::POST)
+                        .uri(uri)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
     }
 }

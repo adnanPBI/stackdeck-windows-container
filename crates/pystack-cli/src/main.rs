@@ -162,6 +162,10 @@ enum ComposeCommands {
         #[arg(long, default_value = "hyperv")]
         backend: String,
 
+        /// Activate Compose profiles
+        #[arg(long = "profile")]
+        profiles: Vec<String>,
+
         /// Run in background
         #[arg(short = 'd', long)]
         detach: bool,
@@ -183,6 +187,10 @@ enum ComposeCommands {
         #[arg(long, default_value = "hyperv")]
         backend: String,
 
+        /// Activate Compose profiles
+        #[arg(long = "profile")]
+        profiles: Vec<String>,
+
         services: Vec<String>,
     },
 
@@ -193,6 +201,10 @@ enum ComposeCommands {
 
         #[arg(long, default_value = "hyperv")]
         backend: String,
+
+        /// Activate Compose profiles
+        #[arg(long = "profile")]
+        profiles: Vec<String>,
 
         #[arg(short = 'v', long)]
         volumes: bool,
@@ -208,6 +220,10 @@ enum ComposeCommands {
         #[arg(long, default_value = "hyperv")]
         backend: String,
 
+        /// Activate Compose profiles
+        #[arg(long = "profile")]
+        profiles: Vec<String>,
+
         #[arg(long)]
         json: bool,
     },
@@ -219,6 +235,10 @@ enum ComposeCommands {
 
         #[arg(long, default_value = "hyperv")]
         backend: String,
+
+        /// Activate Compose profiles
+        #[arg(long = "profile")]
+        profiles: Vec<String>,
 
         service: String,
 
@@ -731,7 +751,7 @@ fn compose_service_to_stack_service(
         volumes: svc
             .volumes
             .iter()
-            .filter_map(compose_volume_string)
+            .filter_map(|volume| compose_volume_string(project, volume))
             .collect(),
         networks: svc
             .networks
@@ -904,13 +924,52 @@ fn compose_port_string(port: &pystack_types::ComposePort) -> Option<String> {
     Some(s)
 }
 
-fn compose_volume_string(volume: &pystack_types::ComposeVolumeMount) -> Option<String> {
+fn compose_volume_string(
+    project: &pystack_types::ComposeProject,
+    volume: &pystack_types::ComposeVolumeMount,
+) -> Option<String> {
     let source = volume.source.as_ref()?;
-    let mut spec = format!("{}:{}", source, volume.target);
+    let resolved_source = if volume.r#type == "volume" {
+        project
+            .volumes
+            .get(source)
+            .map(|resource| resource.name.as_str())
+            .unwrap_or(source)
+    } else {
+        source
+    };
+    let mut spec = format!("{}:{}", resolved_source, volume.target);
     if volume.read_only {
         spec.push_str(":ro");
     }
     Some(spec)
+}
+
+fn removable_hyperv_volume_names(stack: &pystack_types::StackConfig) -> Vec<String> {
+    let mut volume_names = Vec::new();
+    for (vname, vconfig) in &stack.volumes {
+        let is_external = vconfig
+            .get("external")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_external {
+            continue;
+        }
+        let name = vconfig
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                if stack.source_format == "compose" {
+                    format!("{}_{}", stack.project, vname)
+                } else {
+                    format!("{}_{}", pystack_hyperv::project_slug(&stack.project), vname)
+                }
+            });
+        volume_names.push(name);
+    }
+    volume_names.sort();
+    volume_names
 }
 
 fn stack_service_to_hyperv(
@@ -944,10 +1003,10 @@ fn stack_service_to_hyperv(
 fn load_compose_stack(
     file: &str,
     backend: &str,
-    services: &[String],
+    profiles: &[String],
 ) -> Result<pystack_types::StackConfig> {
     let path = PathBuf::from(file);
-    let project = pystack_compose::load_compose_file(&path, None, services, None, None)?;
+    let project = pystack_compose::load_compose_file(&path, None, profiles, None, None)?;
     compose_project_to_stack(project, &path, backend)
 }
 
@@ -1190,33 +1249,40 @@ async fn main() -> Result<()> {
             ComposeCommands::Up {
                 file,
                 backend,
+                profiles,
                 detach,
                 build,
                 interval,
                 services,
-            } => cmd_compose_up(&file, &backend, detach, build, interval, &services)?,
+            } => cmd_compose_up(
+                &file, &backend, &profiles, detach, build, interval, &services,
+            )?,
             ComposeCommands::Build {
                 file,
                 backend,
+                profiles,
                 services,
-            } => cmd_compose_build(&file, &backend, &services)?,
+            } => cmd_compose_build(&file, &backend, &profiles, &services)?,
             ComposeCommands::Down {
                 file,
                 backend,
+                profiles,
                 volumes,
                 services,
-            } => cmd_compose_down(&file, &backend, volumes, &services)?,
+            } => cmd_compose_down(&file, &backend, &profiles, volumes, &services)?,
             ComposeCommands::Status {
                 file,
                 backend,
+                profiles,
                 json,
-            } => cmd_compose_status(&file, &backend, json)?,
+            } => cmd_compose_status(&file, &backend, &profiles, json)?,
             ComposeCommands::Logs {
                 file,
                 backend,
+                profiles,
                 service,
                 tail,
-            } => cmd_compose_logs(&file, &backend, &service, tail)?,
+            } => cmd_compose_logs(&file, &backend, &profiles, &service, tail)?,
         },
 
         // ---- Hyper-V commands ----
@@ -1357,17 +1423,7 @@ fn cmd_down(
         }
     }
     if volumes {
-        let mut volume_names = Vec::new();
-        for (vname, vconfig) in &stack.volumes {
-            let is_external = vconfig
-                .get("external")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !is_external {
-                let name = format!("{}_{}", pystack_hyperv::project_slug(&stack.project), vname);
-                volume_names.push(name);
-            }
-        }
+        let volume_names = removable_hyperv_volume_names(&stack);
         if !volume_names.is_empty() {
             let refs: Vec<&str> = volume_names.iter().map(|s| s.as_str()).collect();
             match hyperv_mgr.volume_remove(&refs, true) {
@@ -1715,10 +1771,15 @@ fn wait_for_dependency(
         } else {
             match dep.condition.as_str() {
                 "service_healthy" => native_mgr.health_ok(&dep.service).unwrap_or(false),
-                "service_completed_successfully" => {
-                    !native_mgr.health_ok(&dep.service).unwrap_or(false)
+                "service_completed_successfully" => native_mgr
+                    .service_completed_successfully(&dep.service)
+                    .unwrap_or(false),
+                _ => {
+                    native_mgr.health_ok(&dep.service).unwrap_or(false)
+                        || native_mgr
+                            .service_completed_successfully(&dep.service)
+                            .unwrap_or(false)
                 }
-                _ => native_mgr.health_ok(&dep.service).unwrap_or(false),
             }
         };
         if ready {
@@ -1759,17 +1820,7 @@ fn run_stack_down(
         }
     }
     if volumes {
-        let mut volume_names = Vec::new();
-        for (vname, vconfig) in &stack.volumes {
-            let is_external = vconfig
-                .get("external")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !is_external {
-                let name = format!("{}_{}", pystack_hyperv::project_slug(&stack.project), vname);
-                volume_names.push(name);
-            }
-        }
+        let volume_names = removable_hyperv_volume_names(&stack);
         if !volume_names.is_empty() {
             let refs: Vec<&str> = volume_names.iter().map(|s| s.as_str()).collect();
             match hyperv_mgr.volume_remove(&refs, true) {
@@ -2145,12 +2196,13 @@ async fn cmd_gui(host: &str, port: u16) -> Result<()> {
 fn cmd_compose_up(
     file: &str,
     backend: &str,
+    profiles: &[String],
     detach: bool,
     build: bool,
     interval: u32,
     services: &[String],
 ) -> Result<()> {
-    let stack = load_compose_stack(file, backend, services)?;
+    let stack = load_compose_stack(file, backend, profiles)?;
     println!("Project: {} (backend={})", stack.project, backend);
     let targets = if services.is_empty() {
         stack.services.keys().cloned().collect::<Vec<_>>()
@@ -2160,8 +2212,13 @@ fn cmd_compose_up(
     run_stack_up(stack, backend, &targets, false, build, !detach, interval)
 }
 
-fn cmd_compose_build(file: &str, backend: &str, services: &[String]) -> Result<()> {
-    let stack = load_compose_stack(file, backend, services)?;
+fn cmd_compose_build(
+    file: &str,
+    backend: &str,
+    profiles: &[String],
+    services: &[String],
+) -> Result<()> {
+    let stack = load_compose_stack(file, backend, profiles)?;
     println!("Building project: {}", stack.project);
     let targets = if services.is_empty() {
         stack.services.keys().cloned().collect::<Vec<_>>()
@@ -2200,8 +2257,14 @@ fn cmd_compose_build(file: &str, backend: &str, services: &[String]) -> Result<(
     Ok(())
 }
 
-fn cmd_compose_down(file: &str, backend: &str, volumes: bool, services: &[String]) -> Result<()> {
-    let stack = load_compose_stack(file, backend, &[])?;
+fn cmd_compose_down(
+    file: &str,
+    backend: &str,
+    profiles: &[String],
+    volumes: bool,
+    services: &[String],
+) -> Result<()> {
+    let stack = load_compose_stack(file, backend, profiles)?;
     println!("Stopping project: {}", stack.project);
     let targets = if services.is_empty() {
         stack.services.keys().cloned().collect::<Vec<_>>()
@@ -2211,13 +2274,24 @@ fn cmd_compose_down(file: &str, backend: &str, volumes: bool, services: &[String
     run_stack_down(stack, backend, &targets, volumes)
 }
 
-fn cmd_compose_status(file: &str, backend: &str, json_output: bool) -> Result<()> {
-    let stack = load_compose_stack(file, backend, &[])?;
+fn cmd_compose_status(
+    file: &str,
+    backend: &str,
+    profiles: &[String],
+    json_output: bool,
+) -> Result<()> {
+    let stack = load_compose_stack(file, backend, profiles)?;
     run_stack_status(stack, backend, json_output)
 }
 
-fn cmd_compose_logs(file: &str, backend: &str, service: &str, tail: u32) -> Result<()> {
-    let stack = load_compose_stack(file, backend, &[])?;
+fn cmd_compose_logs(
+    file: &str,
+    backend: &str,
+    profiles: &[String],
+    service: &str,
+    tail: u32,
+) -> Result<()> {
+    let stack = load_compose_stack(file, backend, profiles)?;
     if !stack.services.contains_key(service) {
         anyhow::bail!("Service '{}' not found in compose file", service);
     }
@@ -2536,4 +2610,80 @@ fn preflight_check() -> Result<()> {
         eprintln!("WARNING: tar.exe not found in PATH. Some features might not work properly.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compose_profiles_are_explicit_not_service_selection() {
+        let file = write_compose(
+            "profiles",
+            r#"
+name: demo
+services:
+  web:
+    image: nginx
+  debug:
+    image: busybox
+    profiles:
+      - debug
+"#,
+        );
+
+        let selected_services = vec!["debug".to_string()];
+        let stack = load_compose_stack(&file, "hyperv", &[]).unwrap();
+
+        assert!(stack.services.contains_key("web"));
+        assert!(!stack.services.contains_key("debug"));
+        assert_eq!(selected_services, vec!["debug".to_string()]);
+
+        let active_profiles = vec!["debug".to_string()];
+        let stack = load_compose_stack(&file, "hyperv", &active_profiles).unwrap();
+
+        assert!(stack.services.contains_key("debug"));
+    }
+
+    #[test]
+    fn compose_volume_mounts_and_down_v_use_resolved_resource_names() {
+        let file = write_compose(
+            "volumes",
+            r#"
+name: demo
+services:
+  web:
+    image: nginx
+    volumes:
+      - data:/data
+      - external_data:/external:ro
+      - ./src:/src
+volumes:
+  data:
+    name: fixed_data
+  external_data:
+    external:
+      name: already_there
+"#,
+        );
+
+        let stack = load_compose_stack(&file, "hyperv", &[]).unwrap();
+        let web = stack.services.get("web").unwrap();
+
+        assert!(web.volumes.contains(&"fixed_data:/data".to_string()));
+        assert!(web
+            .volumes
+            .contains(&"already_there:/external:ro".to_string()));
+        assert!(web.volumes.contains(&"./src:/src".to_string()));
+        assert_eq!(removable_hyperv_volume_names(&stack), vec!["fixed_data"]);
+    }
+
+    fn write_compose(name: &str, contents: &str) -> String {
+        let dir =
+            std::env::temp_dir().join(format!("pystack-cli-test-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("compose.yml");
+        std::fs::write(&path, contents).unwrap();
+        path.to_string_lossy().to_string()
+    }
 }

@@ -59,6 +59,7 @@ tauri-build = "=2.2.0"
 subtle = "2"
 sha2 = "0.10"
 rand = "0.8"
+windows-sys = "0.59"
 
 # Internal crates
 pystack-types = { path = "crates/pystack-types" }

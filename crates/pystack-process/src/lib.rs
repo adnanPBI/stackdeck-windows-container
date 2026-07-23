@@ -6,7 +6,10 @@
 pub use pystack_types::{HealthCheck, ResourceLimits, ServiceConfig, StackConfig, StartResult};
 
 use pystack_state::{ServiceUpdate, StateDb};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -134,16 +137,10 @@ impl ProcessManager {
             )));
         }
 
-        // Verify ports are not already in use
+        // Verify published host ports are not already in use.
         for port_str in &svc.ports {
-            let port_to_check: u16 = if let Some(idx) = port_str.rfind(':') {
-                port_str[idx + 1..].parse().unwrap_or(0)
-            } else {
-                port_str.parse().unwrap_or(0)
-            };
-            if port_to_check > 0 {
-                if let Err(_) = std::net::TcpListener::bind(format!("127.0.0.1:{}", port_to_check))
-                {
+            if let Some(port_to_check) = native_host_port(port_str) {
+                if std::net::TcpListener::bind(("127.0.0.1", port_to_check)).is_err() {
                     return Ok(StartResult {
                         service: name.to_string(),
                         ok: false,
@@ -155,6 +152,14 @@ impl ProcessManager {
 
         // Open log files
         let (stdout_path, stderr_path) = self.open_log_paths(name);
+        let stdout_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stdout_path)?;
+        let stderr_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr_path)?;
 
         // Prepare environment
         let env = self.prepare_env(name);
@@ -173,8 +178,8 @@ impl ProcessManager {
         }
         cmd.current_dir(&svc.cwd)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file));
 
         for (k, v) in &env {
             cmd.env(k, v);
@@ -199,15 +204,10 @@ impl ProcessManager {
             });
         }
 
-        let mut child = cmd.spawn()?;
+        let child = cmd.spawn()?;
         let pid = child.id();
-
-        if let Some(stdout) = child.stdout.take() {
-            spawn_and_monitor_logger(stdout, stdout_path, svc.log_max_bytes, svc.log_backups);
-        }
-        if let Some(stderr) = child.stderr.take() {
-            spawn_and_monitor_logger(stderr, stderr_path, svc.log_max_bytes, svc.log_backups);
-        }
+        let command_hash =
+            process_identity(pid).unwrap_or_else(|| service_config_identity(name, svc, &args));
 
         // Track the child
         self.children.insert(name.to_string(), child);
@@ -219,6 +219,7 @@ impl ProcessManager {
                 &ServiceUpdate {
                     pid: Some(pid),
                     status: Some("starting".to_string()),
+                    command_hash: Some(command_hash),
                     cwd: Some(svc.cwd.to_string_lossy().into_owned()),
                     started_at: Some(now_iso()),
                     last_error: Some(String::new()),
@@ -241,21 +242,31 @@ impl ProcessManager {
         }
         if died {
             self.children.remove(name);
+            let success = exit_code == Some(0);
+            let last_error = if success {
+                String::new()
+            } else {
+                format!("exited immediately with {:?}", exit_code)
+            };
             self.db
                 .clear_pid(
                     name,
-                    "failed",
+                    if success { "completed" } else { "failed" },
                     exit_code,
-                    &format!("exited immediately with {:?}", exit_code),
+                    &last_error,
                 )
                 .map_err(|e| ProcessError::Stack(e.to_string()))?;
             return Ok(StartResult {
                 service: name.to_string(),
-                ok: false,
-                message: format!(
-                    "{}: failed immediately exit={:?}; check logs",
-                    name, exit_code
-                ),
+                ok: success,
+                message: if success {
+                    format!("{}: completed successfully exit=0", name)
+                } else {
+                    format!(
+                        "{}: failed immediately exit={:?}; check logs",
+                        name, exit_code
+                    )
+                },
             });
         }
 
@@ -421,13 +432,21 @@ impl ProcessManager {
             .map_err(|e| ProcessError::Stack(e.to_string()))?;
         let pid = row.as_ref().and_then(|r| r.pid);
 
-        if let Some(pid) = pid {
-            if !is_pid_running(pid) {
-                self.db
-                    .clear_pid(name, "stopped", None, "")
-                    .map_err(|e| ProcessError::Stack(e.to_string()))?;
-                return Ok(false);
-            }
+        let Some(pid) = pid else {
+            return Ok(false);
+        };
+
+        if !is_pid_running(pid) {
+            self.db
+                .clear_pid(name, "stopped", None, "")
+                .map_err(|e| ProcessError::Stack(e.to_string()))?;
+            return Ok(false);
+        }
+
+        let args = self.build_command_args(name);
+        let expected_config_identity = service_config_identity(name, svc, &args);
+        if !persisted_process_identity_matches(row.as_ref(), pid, &expected_config_identity) {
+            return Ok(false);
         }
 
         let h = &svc.healthcheck;
@@ -463,10 +482,28 @@ impl ProcessManager {
                     return Ok(false);
                 }
 
-                Ok(run_health_command(&args, use_shell, h.timeout_seconds))
+                let env = self.prepare_env(name);
+                Ok(run_health_command(
+                    &args,
+                    use_shell,
+                    h.timeout_seconds,
+                    &svc.cwd,
+                    &env,
+                ))
             }
             _ => Ok(false),
         }
+    }
+
+    /// Check whether a service has an explicit persisted successful exit.
+    pub fn service_completed_successfully(&self, name: &str) -> Result<bool, ProcessError> {
+        let row = self
+            .db
+            .get(name)
+            .map_err(|e| ProcessError::Stack(e.to_string()))?;
+        Ok(row
+            .as_ref()
+            .is_some_and(|row| row.pid.is_none() && row.last_exit_code == Some(0)))
     }
 
     /// Wait for a service to become healthy.
@@ -550,7 +587,12 @@ impl ProcessManager {
                 .get(dep)
                 .map_err(|e| ProcessError::Stack(e.to_string()))?;
             match dep_row {
-                Some(row) if row.status == "running" => continue,
+                Some(row)
+                    if row.status == "running"
+                        || (row.pid.is_none() && row.last_exit_code == Some(0)) =>
+                {
+                    continue
+                }
                 _ => {
                     return Ok(false);
                 }
@@ -625,13 +667,13 @@ impl ProcessManager {
         for (_name, svc) in &self.stack.services {
             if svc.backend == "native" || svc.backend.is_empty() {
                 for vol in &svc.volumes {
-                    if let Some((source, _)) = vol.split_once(':') {
+                    if let Some(source) = volume_mount_source(vol) {
                         let path = PathBuf::from(source);
                         if path.is_absolute() {
                             // Do not attempt to delete absolute host mounts.
                             continue;
                         }
-                        let target_path = self.stack.root.join(&path);
+                        let target_path = self.stack.state_dir.join("volumes").join(&path);
 
                         if !target_path.exists() || !target_path.is_dir() {
                             continue;
@@ -642,7 +684,7 @@ impl ProcessManager {
                                 target_path.display()
                             ))
                         })?;
-                        if !canonical.starts_with(&root) {
+                        if !should_remove_native_volume(&self.stack, source, &canonical, &root) {
                             continue;
                         }
                         std::fs::remove_dir_all(&canonical)?;
@@ -652,6 +694,140 @@ impl ProcessManager {
         }
         Ok(())
     }
+}
+
+fn should_remove_native_volume(
+    stack: &StackConfig,
+    source: &str,
+    canonical: &Path,
+    root: &Path,
+) -> bool {
+    if source.is_empty()
+        || source.contains('/')
+        || source.contains('\\')
+        || source == "."
+        || source == ".."
+    {
+        return false;
+    }
+    if canonical == root || !canonical.starts_with(root) {
+        return false;
+    }
+    let managed_root = root.join(".pystack").join("volumes");
+    if !canonical.starts_with(&managed_root) {
+        return false;
+    }
+    stack
+        .volumes
+        .get(source)
+        .is_some_and(|volume| !volume_is_external(volume))
+}
+
+fn volume_mount_source(spec: &str) -> Option<&str> {
+    let bytes = spec.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && (bytes[2] == b'\\' || bytes[2] == b'/') {
+        return spec[3..].find(':').map(|idx| &spec[..idx + 3]);
+    }
+    spec.split_once(':').map(|(source, _)| source)
+}
+
+fn volume_is_external(volume: &serde_json::Value) -> bool {
+    match volume {
+        serde_json::Value::Bool(external) => *external,
+        serde_json::Value::Object(obj) => obj
+            .get("external")
+            .map(|external| match external {
+                serde_json::Value::Bool(value) => *value,
+                serde_json::Value::Object(cfg) => cfg
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .is_some_and(|name| !name.trim().is_empty()),
+                _ => false,
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn native_host_port(spec: &str) -> Option<u16> {
+    let spec = spec.split_once('/').map_or(spec, |(base, _)| base).trim();
+    if spec.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = spec.split(':').collect();
+    let candidate = match parts.as_slice() {
+        [single] => *single,
+        [host, _container] => *host,
+        [_, host, _container] => *host,
+        _ => return None,
+    };
+    candidate.parse::<u16>().ok().filter(|port| *port > 0)
+}
+
+fn service_config_identity(name: &str, svc: &ServiceConfig, args: &[String]) -> String {
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    svc.cwd.to_string_lossy().hash(&mut hasher);
+    args.hash(&mut hasher);
+    format!("config:{:016x}", hasher.finish())
+}
+
+fn persisted_process_identity_matches(
+    row: Option<&pystack_types::ServiceStatus>,
+    pid: u32,
+    expected_config_identity: &str,
+) -> bool {
+    let Some(row) = row else {
+        return false;
+    };
+    let Some(persisted) = row.command_hash.as_deref() else {
+        return false;
+    };
+    if persisted == expected_config_identity {
+        return true;
+    }
+    process_identity(pid).is_some_and(|identity| identity == persisted)
+}
+
+#[cfg(target_os = "windows")]
+fn process_identity(pid: u32) -> Option<String> {
+    let script = format!(
+        "$p=Get-CimInstance Win32_Process -Filter \"ProcessId = {}\"; if ($p) {{ \"win:$($p.ProcessId)|$($p.CreationDate)|$($p.ExecutablePath)|$($p.CommandLine)\" }}",
+        pid
+    );
+    let output = create_command("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let identity = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!identity.is_empty()).then_some(identity)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn process_identity(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let start_time = stat.split_whitespace().nth(21)?;
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .ok()
+        .map(|bytes| {
+            bytes
+                .split(|b| *b == 0)
+                .filter(|part| !part.is_empty())
+                .map(|part| String::from_utf8_lossy(part).into_owned())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    Some(format!("unix:{pid}|{start_time}|{exe}|{cmdline}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -731,7 +907,7 @@ fn check_http(url: &str, timeout: u32) -> bool {
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() >= 2 {
         if let Ok(code) = parts[1].parse::<u16>() {
-            return (200..500).contains(&code);
+            return (200..400).contains(&code);
         }
     }
     false
@@ -756,7 +932,13 @@ fn health_timeout(timeout: u32) -> Duration {
     Duration::from_secs(std::cmp::max(1, timeout) as u64)
 }
 
-fn run_health_command(args: &[String], use_shell: bool, timeout_seconds: u32) -> bool {
+fn run_health_command(
+    args: &[String],
+    use_shell: bool,
+    timeout_seconds: u32,
+    cwd: &Path,
+    env: &HashMap<String, String>,
+) -> bool {
     let mut cmd = if use_shell {
         shell_command(args.join(" "))
     } else {
@@ -768,7 +950,11 @@ fn run_health_command(args: &[String], use_shell: bool, timeout_seconds: u32) ->
     };
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        .current_dir(cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
 
     let Ok(mut child) = cmd.spawn() else {
         return false;
@@ -846,59 +1032,6 @@ fn rotate_log(path: &Path, max_bytes: u64, backups: u32) {
         }
     }
     let _ = std::fs::rename(path, path.with_extension("log.1"));
-}
-
-fn spawn_and_monitor_logger<R: std::io::Read + Send + 'static>(
-    mut pipe: R,
-    path: PathBuf,
-    max_bytes: u64,
-    backups: u32,
-) {
-    let limit = if max_bytes == 0 {
-        10 * 1024 * 1024
-    } else {
-        max_bytes
-    };
-    std::thread::spawn(move || {
-        let mut file = match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            Ok(f) => f,
-            Err(_) => return,
-        };
-
-        let mut bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
-        let mut buffer = [0u8; 8192];
-
-        loop {
-            match pipe.read(&mut buffer) {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    if file.write_all(&buffer[..n]).is_err() {
-                        break;
-                    }
-                    bytes_written += n as u64;
-                    if bytes_written > limit {
-                        let _ = file.sync_all();
-                        drop(file);
-                        rotate_log(&path, limit, backups);
-                        file = match std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&path)
-                        {
-                            Ok(f) => f,
-                            Err(_) => return,
-                        };
-                        bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,13 +1245,15 @@ mod tests {
     }
 
     #[test]
-    fn test_teardown_volumes_does_not_delete_outside_root() {
+    fn test_teardown_volumes_only_deletes_declared_named_volumes() {
         let base = std::env::temp_dir().join("pystack_volume_safety_test");
         let root = base.join("project");
         let outside = base.join("important");
-        let inside = root.join("data");
+        let bind_inside = root.join("data");
+        let named = root.join(".pystack").join("volumes").join("cache");
         let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&bind_inside).unwrap();
+        std::fs::create_dir_all(&named).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
 
         let mut services = HashMap::new();
@@ -1128,12 +1263,141 @@ mod tests {
                 name: "web".into(),
                 cwd: root.clone(),
                 command: serde_json::json!(["echo", "ok"]),
-                volumes: vec!["data:/data".into(), "../important:/important".into()],
+                volumes: vec![
+                    "data:/data".into(),
+                    "cache:/cache".into(),
+                    "../important:/important".into(),
+                    ".:/workspace".into(),
+                ],
                 ..Default::default()
             },
         );
         let stack = StackConfig {
             project: "volume-safety".into(),
+            root: root.clone(),
+            config_path: root.join("stack.json"),
+            state_dir: root.join(".pystack"),
+            log_dir: root.join(".pystack/logs"),
+            services,
+            volumes: HashMap::from([("cache".to_string(), serde_json::json!({}))]),
+            secrets: HashMap::new(),
+            configs: HashMap::new(),
+            source_format: "pystack".into(),
+        };
+        let mgr = ProcessManager::new(stack).unwrap();
+
+        mgr.teardown_volumes().unwrap();
+
+        assert!(bind_inside.exists());
+        assert!(!named.exists());
+        assert!(outside.exists());
+        assert!(root.exists());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_teardown_volumes_skips_external_named_volumes() {
+        let base = std::env::temp_dir().join("pystack_volume_external_safety_test");
+        let root = base.join("project");
+        let named = root.join(".pystack").join("volumes").join("cache");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&named).unwrap();
+
+        let mut services = HashMap::new();
+        services.insert(
+            "web".to_string(),
+            ServiceConfig {
+                name: "web".into(),
+                cwd: root.clone(),
+                command: serde_json::json!(["echo", "ok"]),
+                volumes: vec!["cache:/cache".into()],
+                ..Default::default()
+            },
+        );
+        let stack = StackConfig {
+            project: "volume-external-safety".into(),
+            root: root.clone(),
+            config_path: root.join("stack.json"),
+            state_dir: root.join(".pystack"),
+            log_dir: root.join(".pystack/logs"),
+            services,
+            volumes: HashMap::from([(
+                "cache".to_string(),
+                serde_json::json!({ "external": true }),
+            )]),
+            secrets: HashMap::new(),
+            configs: HashMap::new(),
+            source_format: "pystack".into(),
+        };
+        let mgr = ProcessManager::new(stack).unwrap();
+
+        mgr.teardown_volumes().unwrap();
+
+        assert!(named.exists());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_native_host_port_uses_published_host_port() {
+        assert_eq!(native_host_port("8080:80"), Some(8080));
+        assert_eq!(native_host_port("127.0.0.1:8081:80/tcp"), Some(8081));
+        assert_eq!(native_host_port("9000"), Some(9000));
+        assert_eq!(native_host_port("127.0.0.1::80"), None);
+    }
+
+    #[test]
+    fn test_volume_mount_source_handles_windows_drive_binds() {
+        assert_eq!(volume_mount_source("cache:/cache"), Some("cache"));
+        assert_eq!(
+            volume_mount_source(r"C:\Users\me\data:/data"),
+            Some(r"C:\Users\me\data")
+        );
+        assert_eq!(volume_mount_source("./data:/data"), Some("./data"));
+    }
+
+    #[test]
+    fn test_http_health_accepts_only_success_and_redirect_statuses() {
+        fn once(status: u16) -> String {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let addr = listener.local_addr().unwrap();
+            std::thread::spawn(move || {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    let response = format!("HTTP/1.0 {status} test\r\nContent-Length: 0\r\n\r\n");
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            format!("http://{addr}/health")
+        }
+
+        assert!(check_http(&once(204), 1));
+        assert!(check_http(&once(302), 1));
+        assert!(!check_http(&once(404), 1));
+        assert!(!check_http(&once(500), 1));
+    }
+
+    #[test]
+    fn test_health_requires_persisted_pid() {
+        let base = std::env::temp_dir().join("pystack_missing_pid_health_test");
+        let root = base.join("project");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut services = HashMap::new();
+        services.insert(
+            "web".to_string(),
+            ServiceConfig {
+                name: "web".into(),
+                cwd: root.clone(),
+                command: serde_json::json!(["echo", "ok"]),
+                healthcheck: HealthCheck {
+                    r#type: "process".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let stack = StackConfig {
+            project: "missing-pid-health".into(),
             root: root.clone(),
             config_path: root.join("stack.json"),
             state_dir: root.join(".pystack"),
@@ -1145,12 +1409,133 @@ mod tests {
             source_format: "pystack".into(),
         };
         let mgr = ProcessManager::new(stack).unwrap();
+        mgr.db()
+            .upsert(
+                "web",
+                &ServiceUpdate {
+                    status: Some("running".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
-        mgr.teardown_volumes().unwrap();
-
-        assert!(!inside.exists());
-        assert!(outside.exists());
+        assert!(!mgr.health_ok("web").unwrap());
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_health_rejects_running_pid_with_wrong_identity() {
+        let base = std::env::temp_dir().join("pystack_pid_identity_health_test");
+        let root = base.join("project");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut services = HashMap::new();
+        services.insert(
+            "web".to_string(),
+            ServiceConfig {
+                name: "web".into(),
+                cwd: root.clone(),
+                command: serde_json::json!(["echo", "ok"]),
+                healthcheck: HealthCheck {
+                    r#type: "process".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let stack = StackConfig {
+            project: "pid-identity-health".into(),
+            root: root.clone(),
+            config_path: root.join("stack.json"),
+            state_dir: root.join(".pystack"),
+            log_dir: root.join(".pystack/logs"),
+            services,
+            volumes: HashMap::new(),
+            secrets: HashMap::new(),
+            configs: HashMap::new(),
+            source_format: "pystack".into(),
+        };
+        let mgr = ProcessManager::new(stack).unwrap();
+        mgr.db()
+            .upsert(
+                "web",
+                &ServiceUpdate {
+                    pid: Some(std::process::id()),
+                    status: Some("running".into()),
+                    command_hash: Some("definitely-not-this-process".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert!(!mgr.health_ok("web").unwrap());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_service_completed_successfully_requires_explicit_zero_exit_code() {
+        let base = std::env::temp_dir().join("pystack_completion_health_test");
+        let root = base.join("project");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut services = HashMap::new();
+        services.insert(
+            "setup".to_string(),
+            ServiceConfig {
+                name: "setup".into(),
+                cwd: root.clone(),
+                command: serde_json::json!(["echo", "ok"]),
+                ..Default::default()
+            },
+        );
+        let stack = StackConfig {
+            project: "completion-health".into(),
+            root: root.clone(),
+            config_path: root.join("stack.json"),
+            state_dir: root.join(".pystack"),
+            log_dir: root.join(".pystack/logs"),
+            services,
+            volumes: HashMap::new(),
+            secrets: HashMap::new(),
+            configs: HashMap::new(),
+            source_format: "pystack".into(),
+        };
+        let mgr = ProcessManager::new(stack).unwrap();
+        mgr.db()
+            .upsert(
+                "setup",
+                &ServiceUpdate {
+                    status: Some("completed".into()),
+                    last_exit_code: Some(0),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(mgr.service_completed_successfully("setup").unwrap());
+
+        mgr.db().clear_pid("setup", "completed", None, "").unwrap();
+        assert!(!mgr.service_completed_successfully("setup").unwrap());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_command_health_uses_service_cwd_and_env() {
+        let dir = std::env::temp_dir().join("pystack_command_health_context_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker.txt"), "ok").unwrap();
+        let env = HashMap::from([("PYSTACK_HEALTH_TEST".to_string(), "ok".to_string())]);
+        #[cfg(target_os = "windows")]
+        let script =
+            "if \"%PYSTACK_HEALTH_TEST%\"==\"ok\" (if exist marker.txt (exit 0)) && exit 1";
+        #[cfg(not(target_os = "windows"))]
+        let script = "test \"$PYSTACK_HEALTH_TEST\" = ok && test -f marker.txt";
+        let args = vec![script.to_string()];
+
+        assert!(run_health_command(&args, true, 1, &dir, &env));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

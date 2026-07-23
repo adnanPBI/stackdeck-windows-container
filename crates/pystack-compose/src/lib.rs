@@ -1057,10 +1057,10 @@ fn normalize_resources(
             _ => &serde_yaml::Mapping::new(),
         };
         let key = k.as_str().unwrap_or_default().to_string();
-        let external_raw = config
-            .get(&serde_yaml::Value::String("external".into()))
-            .and_then(|val: &serde_yaml::Value| val.as_bool())
-            .unwrap_or(false);
+        let external_raw = matches!(
+            config.get(&serde_yaml::Value::String("external".into())),
+            Some(serde_yaml::Value::Bool(true)) | Some(serde_yaml::Value::Mapping(_))
+        );
         result.insert(
             key.clone(),
             ComposeResource {
@@ -1554,6 +1554,9 @@ services:
       - ./config:/etc/app:ro
 volumes:
   data:
+  shared:
+    external:
+      name: shared_data
 "#;
         let project = parse_compose(yaml, Some("test"), &[], None, None).unwrap();
         let app = project.services.get("app").unwrap();
@@ -1568,6 +1571,10 @@ volumes:
         assert_eq!(config_vol.r#type, "bind");
         assert_eq!(config_vol.source, Some("./config".to_string()));
         assert!(config_vol.read_only);
+
+        let shared = project.volumes.get("shared").unwrap();
+        assert_eq!(shared.name, "shared_data");
+        assert!(shared.external);
     }
 
     #[test]
@@ -1635,5 +1642,11 @@ services:
         let mut m = serde_yaml::Mapping::new();
         m.insert("external".into(), true.into());
         assert_eq!(resource_name("myapp", "db", &m), "db");
+
+        let mut external = serde_yaml::Mapping::new();
+        external.insert("name".into(), "shared_db".into());
+        let mut m = serde_yaml::Mapping::new();
+        m.insert("external".into(), serde_yaml::Value::Mapping(external));
+        assert_eq!(resource_name("myapp", "db", &m), "shared_db");
     }
 }
