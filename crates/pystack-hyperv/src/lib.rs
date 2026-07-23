@@ -1468,8 +1468,24 @@ if ($dnsIp) {{
             }
         }
 
-        if let Some(hc) = &svc.healthcheck {
-            args.extend(nerdctl_health_args(hc));
+        let health_command = svc.healthcheck.as_ref().and_then(|hc| {
+            if hc.r#type == "none" {
+                None
+            } else {
+                hc.test.as_ref().and_then(compose_health_command)
+            }
+        });
+        let use_native_health = health_command.is_some() && self.supports_nerdctl_health_flags();
+
+        if use_native_health {
+            if let Some(hc) = &svc.healthcheck {
+                args.extend(nerdctl_health_args(hc));
+            }
+        } else if health_command.is_some() {
+            println!(
+                "{}: nerdctl does not support native health flags; using exec-based health checks",
+                svc.name
+            );
         }
 
         for volume in &svc.volumes {
@@ -1498,33 +1514,13 @@ if ($dnsIp) {{
         let cmd_str = nerdctl_command(cfg, &args);
         let result = self.ssh(&cmd_str, true)?;
 
-        // Wait for container-native health state when Compose healthchecks are present.
-        if let Some(hc) = &svc.healthcheck {
-            if hc.test.is_some() && hc.r#type != "none" {
-                if hc.test.as_ref().and_then(compose_health_command).is_none() {
-                    return Ok(result);
-                }
-                println!("{}: waiting for healthcheck...", svc.name);
-                let cname = container_name(&svc.project, &svc.name);
-                let max_duration = std::time::Duration::from_secs(
-                    (hc.start_period_seconds
-                        + (hc.interval_seconds + hc.timeout_seconds) * hc.retries
-                        + 10) as u64,
-                );
-                let start_time = std::time::Instant::now();
-
-                while start_time.elapsed() < max_duration {
-                    match self.container_health_status(&cname)?.as_str() {
-                        "healthy" => return Ok(result),
-                        "unhealthy" => break,
-                        _ => {}
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                }
-                return Err(HyperVError::Ssh(format!(
-                    "{}: healthcheck failed or timed out",
-                    svc.name
-                )));
+        if let (Some(hc), Some(command)) = (&svc.healthcheck, health_command.as_deref()) {
+            println!("{}: waiting for healthcheck...", svc.name);
+            let cname = container_name(&svc.project, &svc.name);
+            if use_native_health {
+                self.wait_for_native_health(&cname, hc)?;
+            } else {
+                self.wait_for_exec_health(&cname, hc, command)?;
             }
         }
 
@@ -1743,6 +1739,84 @@ if ($dnsIp) {{
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         Ok(if running { "running" } else { "stopped" }.to_string())
+    }
+
+    pub fn service_healthcheck_ok(&self, svc: &HyperVService) -> Result<bool, HyperVError> {
+        let Some(hc) = &svc.healthcheck else {
+            return Ok(true);
+        };
+        if hc.r#type == "none" {
+            return Ok(true);
+        }
+        let Some(command) = hc.test.as_ref().and_then(compose_health_command) else {
+            return Ok(true);
+        };
+        let cname = container_name(&svc.project, &svc.name);
+        self.exec_health_once(&cname, &command)
+    }
+
+    fn supports_nerdctl_health_flags(&self) -> bool {
+        let cmd = format!(
+            "{} 2>&1 | grep -q -- --health-cmd && echo yes || echo no",
+            nerdctl_command(&self.config, &["run", "--help"])
+        );
+        self.ssh(&cmd, false)
+            .map(|out| out.lines().any(|line| line.trim() == "yes"))
+            .unwrap_or(false)
+    }
+
+    fn wait_for_native_health(
+        &self,
+        cname: &str,
+        hc: &pystack_types::HealthCheck,
+    ) -> Result<(), HyperVError> {
+        let max_duration = health_wait_duration(hc);
+        let interval = std::time::Duration::from_secs(hc.interval_seconds.max(1) as u64);
+        let start_time = std::time::Instant::now();
+
+        while start_time.elapsed() < max_duration {
+            match self.container_health_status(cname)?.as_str() {
+                "healthy" => return Ok(()),
+                "unhealthy" => break,
+                _ => {}
+            }
+            std::thread::sleep(interval);
+        }
+        Err(HyperVError::Ssh(format!(
+            "{cname}: healthcheck failed or timed out"
+        )))
+    }
+
+    fn wait_for_exec_health(
+        &self,
+        cname: &str,
+        hc: &pystack_types::HealthCheck,
+        command: &str,
+    ) -> Result<(), HyperVError> {
+        let max_duration = health_wait_duration(hc);
+        let interval = std::time::Duration::from_secs(hc.interval_seconds.max(1) as u64);
+        let start_time = std::time::Instant::now();
+
+        while start_time.elapsed() < max_duration {
+            if self.exec_health_once(cname, command)? {
+                return Ok(());
+            }
+            std::thread::sleep(interval);
+        }
+        Err(HyperVError::Ssh(format!(
+            "{cname}: healthcheck failed or timed out"
+        )))
+    }
+
+    fn exec_health_once(&self, cname: &str, command: &str) -> Result<bool, HyperVError> {
+        let exec = nerdctl_command(&self.config, &["exec", cname, "sh", "-lc", command]);
+        let probe = format!(
+            "if {exec} >/dev/null 2>&1; then echo PYSTACK_HEALTH_OK; else echo PYSTACK_HEALTH_FAIL; fi"
+        );
+        Ok(self
+            .ssh(&probe, false)?
+            .lines()
+            .any(|line| line.trim() == "PYSTACK_HEALTH_OK"))
     }
 
     // -----------------------------------------------------------------------
@@ -2132,6 +2206,13 @@ fn nerdctl_health_args(hc: &pystack_types::HealthCheck) -> Vec<String> {
     args
 }
 
+fn health_wait_duration(hc: &pystack_types::HealthCheck) -> std::time::Duration {
+    std::time::Duration::from_secs(
+        (hc.start_period_seconds + (hc.interval_seconds + hc.timeout_seconds) * hc.retries + 10)
+            as u64,
+    )
+}
+
 fn container_health_from_state(state: &serde_json::Value) -> Option<&str> {
     state.pointer("/Health/Status").and_then(|v| v.as_str())
 }
@@ -2177,8 +2258,8 @@ pub fn parse_port(port: &str) -> Option<(String, u16, u16)> {
 }
 
 fn nerdctl_publish_arg(port: &str) -> Option<String> {
-    let (host_ip, host_port, container_port) = parse_port(port)?;
-    Some(format!("{host_ip}:{host_port}:{container_port}"))
+    let (_, host_port, container_port) = parse_port(port)?;
+    Some(format!("{host_port}:{container_port}"))
 }
 
 struct VolumeSpec {
@@ -2602,19 +2683,16 @@ mod tests {
     }
 
     #[test]
-    fn test_nerdctl_publish_arg_preserves_host_ip() {
+    fn test_nerdctl_publish_arg_uses_vm_reachable_binding() {
         assert_eq!(
             nerdctl_publish_arg("127.0.0.1:8080:80").as_deref(),
-            Some("127.0.0.1:8080:80")
+            Some("8080:80")
         );
         assert_eq!(
             nerdctl_publish_arg("0.0.0.0:8080:80").as_deref(),
-            Some("0.0.0.0:8080:80")
+            Some("8080:80")
         );
-        assert_eq!(
-            nerdctl_publish_arg("8080:80").as_deref(),
-            Some("127.0.0.1:8080:80")
-        );
+        assert_eq!(nerdctl_publish_arg("8080:80").as_deref(), Some("8080:80"));
     }
 
     #[test]

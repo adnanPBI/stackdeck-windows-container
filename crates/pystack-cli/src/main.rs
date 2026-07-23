@@ -1759,6 +1759,12 @@ fn wait_for_dependency(
                 "service_healthy" => {
                     if dep_svc.healthcheck.test.is_some() && dep_svc.healthcheck.r#type != "none" {
                         status == "healthy"
+                            || (status == "running"
+                                && hyperv_mgr
+                                    .service_healthcheck_ok(&stack_service_to_hyperv(
+                                        stack, dep_svc,
+                                    ))
+                                    .unwrap_or(false))
                     } else {
                         status == "running" || status == "healthy"
                     }

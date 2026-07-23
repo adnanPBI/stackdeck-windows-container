@@ -986,20 +986,39 @@ fn stop_container(identifier: &str) -> Result<(), ApiError> {
 }
 
 fn remove_container(identifier: &str) -> Result<(), ApiError> {
-    if let Some((id, meta)) = state_match(identifier)? {
+    let matched = state_match(identifier)?;
+    if let Some((id, meta)) = matched.as_ref() {
         if meta.runtime_id.is_none() {
             let _guard = state_lock()?;
             let mut state = read_state();
-            state.containers.remove(&id);
+            state.containers.remove(id);
             write_state(&state)?;
             return Ok(());
         }
     }
 
-    let reference = container_ref(identifier)?;
     let mgr = manager()?;
-    let cmd = pystack_hyperv::nerdctl_command(mgr.config(), &["rm", "-f", &reference]);
-    mgr.ssh(&cmd, true)?;
+    let reference = if let Some((_id, meta)) = matched.as_ref() {
+        mgr.stop_service(&service_from_meta(meta))?;
+        meta.runtime_name.clone()
+    } else {
+        let reference = container_ref(identifier)?;
+        let cmd = pystack_hyperv::nerdctl_command(mgr.config(), &["rm", "-f", &reference]);
+        mgr.ssh(&cmd, true)?;
+        reference
+    };
+    let verify = mgr.ssh(
+        &format!(
+            "{} >/dev/null 2>&1 && echo PYSTACK_EXISTS || echo PYSTACK_REMOVED",
+            pystack_hyperv::nerdctl_command(mgr.config(), &["inspect", &reference])
+        ),
+        false,
+    )?;
+    if verify.lines().any(|line| line.trim() == "PYSTACK_EXISTS") {
+        return Err(ApiError::HyperV(pystack_hyperv::HyperVError::Ssh(format!(
+            "container {reference} still exists after remove"
+        ))));
+    }
 
     let ident = identifier.trim_start_matches('/');
     let _guard = state_lock()?;
