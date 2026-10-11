@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
@@ -66,6 +66,28 @@ struct CommandResult {
     stderr: String,
     timed_out: bool,
 }
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeSetupStatus {
+    ready: bool,
+    vm_name: String,
+    vm_root: String,
+    disk_gb: u32,
+    vhdx_path: Option<String>,
+    recommended_vm_root: String,
+    smb_enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RuntimeSetupRequest {
+    vm_root: String,
+    disk_gb: u32,
+}
+
+/// The Debian cloud image used by the CLI itself.  The SHA-512 is retrieved
+/// from Debian over HTTPS immediately before initialization rather than asking
+/// a new user to locate or paste a checksum.
+static RUNTIME_SETUP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Serialize)]
 struct SystemStats {
@@ -163,6 +185,240 @@ async fn clear_project_volumes(
 #[tauri::command]
 fn hyperv_health() -> RuntimeOverview {
     collect_hyperv_overview()
+}
+
+#[tauri::command]
+fn runtime_setup_status() -> Result<RuntimeSetupStatus, String> {
+    let config = stackdeck_hyperv::HyperVManager::load_config().map_err(|err| err.to_string())?;
+    let root = PathBuf::from(&config.vm_root);
+    let vhdx_path =
+        find_runtime_vhdx(&root, &config.vm_name).map(|path| path.to_string_lossy().to_string());
+    let ready = vhdx_path.is_some()
+        && stackdeck_hyperv::HyperVManager::new(config.clone())
+            .assert_runtime_ready()
+            .is_ok();
+    Ok(RuntimeSetupStatus {
+        ready,
+        vm_name: config.vm_name,
+        vm_root: config.vm_root,
+        disk_gb: config.vm_disk_gb,
+        vhdx_path,
+        recommended_vm_root: recommended_vm_root(),
+        smb_enabled: !config.windows_host.trim().is_empty()
+            && !config.smb_user.trim().is_empty()
+            && !config.smb_password.trim().is_empty(),
+    })
+}
+
+#[tauri::command]
+async fn provision_runtime(request: RuntimeSetupRequest) -> Result<CommandResult, String> {
+    validate_runtime_setup_request(&request)?;
+    if !qemu_img_available() {
+        return Err("qemu-img.exe is required for the default Debian QCOW2 runtime image. Install QEMU/qemu-img and rerun setup, or use the documented pre-converted VHDX CLI path.".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = RUNTIME_SETUP_LOCK
+            .lock()
+            .map_err(|_| "Runtime setup lock is unavailable.".to_string())?;
+        if !interactive_user_can_self_elevate() {
+            return Err("StackDeck first-run requires the signed-in Windows account itself to be a member of the local Administrators group. Cross-account UAC credentials are intentionally refused because they would split per-user configuration and DPAPI state.".to_string());
+        }
+        let hive = find_hive_exe().ok_or_else(|| {
+            "Could not locate stackdeck-hive.exe. Reinstall a current StackDeck package.".to_string()
+        })?;
+        let script = runtime_setup_script(&hive, &request)?;
+        let encoded = powershell_encoded_command(&script);
+        let launcher = format!(
+            "$p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -PassThru -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','{encoded}'); exit $p.ExitCode"
+        );
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let output = run_command_with_timeout(
+            PathBuf::from("powershell.exe"),
+            cwd,
+            vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), launcher],
+            Duration::from_secs(30 * 60),
+        )?;
+        let detail = if output.status.success() {
+            format!(
+                "Runtime setup completed. Dynamic VHDX created under {}. SMB shared folders remain disabled until configured separately.",
+                request.vm_root
+            )
+        } else {
+            "Runtime setup did not finish. Open the VM tab and review the prerequisites: Hyper-V, Default Switch, and qemu-img are required. If you cancelled the Windows elevation prompt, run setup again and approve it.".to_string()
+        };
+        Ok(CommandResult {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: detail,
+            stderr: bounded_output(&output.stderr),
+            timed_out: output.timed_out,
+        })
+    })
+    .await
+    .map_err(|err| err.to_string())?
+}
+
+fn interactive_user_can_self_elevate() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let script = r#"$sid = 'S-1-5-32-544'; $groups = [Security.Principal.WindowsIdentity]::GetCurrent().Groups; if ($groups | Where-Object { $_.Value -eq $sid }) { exit 0 } else { exit 3 }"#;
+        return create_command("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
+}
+
+fn qemu_img_available() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        if create_command("where.exe")
+            .arg("qemu-img.exe")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return true;
+        }
+        let mut candidates = Vec::new();
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            candidates.push(
+                PathBuf::from(program_files)
+                    .join("qemu")
+                    .join("qemu-img.exe"),
+            );
+        }
+        if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
+            candidates.push(
+                PathBuf::from(program_files_x86)
+                    .join("qemu")
+                    .join("qemu-img.exe"),
+            );
+        }
+        if let Some(choco) = std::env::var_os("ChocolateyInstall") {
+            candidates.push(PathBuf::from(choco).join("bin").join("qemu-img.exe"));
+        }
+        return candidates.into_iter().any(|path| path.is_file());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        true
+    }
+}
+
+fn recommended_vm_root() -> String {
+    stackdeck_types::HyperVConfig::default().vm_root
+}
+
+fn find_runtime_vhdx(root: &Path, vm_name: &str) -> Option<PathBuf> {
+    // The images/ directory contains only the converted base-image cache.  It
+    // may exist even when VM creation/bootstrap failed.  Readiness must be
+    // anchored to the actual per-VM disk created by HyperVManager::init.
+    let vm_disk = root.join(format!("{vm_name}.vhdx"));
+    if vm_disk.is_file() {
+        Some(vm_disk)
+    } else {
+        None
+    }
+}
+
+fn validate_runtime_setup_request(request: &RuntimeSetupRequest) -> Result<(), String> {
+    let root = request.vm_root.trim();
+    if request.disk_gb < 8 || request.disk_gb > 2048 {
+        return Err("Disk size must be between 8 and 2048 GB.".to_string());
+    }
+    if root.len() < 4
+        || root.starts_with(r"\\")
+        || !root.as_bytes().get(1).is_some_and(|value| *value == b':')
+        || !root.as_bytes().get(2).is_some_and(|value| *value == b'\\')
+    {
+        return Err("Choose an absolute local drive path such as C:\\StackDeck\\VMs\\stackdeck-linux; network paths are not supported.".to_string());
+    }
+    if root.contains('\0') || root.contains('\r') || root.contains('\n') {
+        return Err("VM location contains an invalid control character.".to_string());
+    }
+    Ok(())
+}
+
+fn powershell_single_quote(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn powershell_encoded_command(script: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(
+        script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn runtime_setup_script(hive: &Path, request: &RuntimeSetupRequest) -> Result<String, String> {
+    let hive = powershell_single_quote(&hive.to_string_lossy());
+    let root = powershell_single_quote(request.vm_root.trim());
+    let runtime = stackdeck_hyperv::release_runtime_lock().map_err(|err| err.to_string())?;
+    let image_url = powershell_single_quote(&runtime.image_url);
+    let image_sha512 = powershell_single_quote(&runtime.image_sha512);
+    Ok(format!(
+        r#"$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$hive = '{hive}'
+function Invoke-StackDeckHive([string[]]$Arguments) {{
+  & $hive @Arguments
+  if ($LASTEXITCODE -ne 0) {{ throw "stackdeck-hive failed with exit code $LASTEXITCODE" }}
+}}
+function Set-StackDeckPrivateDirectoryAcl([string]$Path) {{
+  $acl = New-Object Security.AccessControl.DirectorySecurity
+  $acl.SetAccessRuleProtection($true, $false)
+  $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+  $propagation = [Security.AccessControl.PropagationFlags]::None
+  $access = [Security.AccessControl.FileSystemRights]::FullControl
+  $allow = [Security.AccessControl.AccessControlType]::Allow
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $sids = @(
+    $identity.User,
+    [Security.Principal.SecurityIdentifier]::new('S-1-5-18'),
+    [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
+  )
+  foreach ($sid in $sids) {{
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+      $sid, $access, $inheritance, $propagation, $allow
+    )
+    [void]$acl.AddAccessRule($rule)
+  }}
+  [IO.Directory]::SetAccessControl($Path, $acl)
+}}
+function Initialize-StackDeckMachineConfigRoot {{
+  $dataRoot = Join-Path $env:ProgramData 'StackDeck'
+  $configRoot = Join-Path $dataRoot 'config'
+  foreach ($path in @($dataRoot, $configRoot)) {{
+    if (Test-Path -LiteralPath $path) {{
+      $item = Get-Item -LiteralPath $path -Force
+      if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{
+        throw "Refusing to use a reparse point for StackDeck machine config: $path"
+      }}
+    }}
+    [IO.Directory]::CreateDirectory($path) | Out-Null
+    Set-StackDeckPrivateDirectoryAcl -Path $path
+  }}
+  return $configRoot
+}}
+$env:STACKDECK_CONFIG_DIR = Initialize-StackDeckMachineConfigRoot
+Invoke-StackDeckHive @('hyperv','configure','--vm-name','stackdeck-linux','--vm-root','{root}','--disk-gb','{disk_gb}','--memory-mb','4096','--cpus','2','--switch-name','Default Switch','--portproxy','true')
+Invoke-StackDeckHive @('hyperv','ensure-key')
+Invoke-StackDeckHive @('hyperv','init','--url','{image_url}','--sha512','{image_sha512}','--timeout','900')
+Invoke-StackDeckHive @('hyperv','health')
+Invoke-StackDeckHive @('hyperv','ps')
+"#,
+        disk_gb = request.disk_gb,
+    ))
 }
 
 static SYSTEM: std::sync::LazyLock<std::sync::Mutex<sysinfo::System>> =
@@ -274,7 +530,7 @@ fn is_allowed_service_host(host: &str) -> bool {
         return true;
     }
 
-    pystack_hyperv::HyperVManager::load_config()
+    stackdeck_hyperv::HyperVManager::load_config()
         .map(|cfg| !cfg.ssh_host.is_empty() && host == cfg.ssh_host)
         .unwrap_or(false)
 }
@@ -288,7 +544,7 @@ fn find_project(project_name: &str) -> Result<ProjectEntry, String> {
 
 #[tauri::command]
 fn read_projects() -> Result<Vec<ProjectEntry>, String> {
-    let path = pystack_types::registry_file();
+    let path = stackdeck_types::registry_file();
     let text = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
     let raw: HashMap<String, serde_json::Value> = serde_json::from_str(&text).unwrap_or_default();
     let mut projects = raw
@@ -339,7 +595,7 @@ fn project_config_path(project: &ProjectEntry) -> PathBuf {
 }
 
 fn read_compose_services(project: &ProjectEntry, config: &PathBuf) -> Vec<ServiceEntry> {
-    let parsed = match pystack_compose::load_compose_file(config, None, &[], None, None) {
+    let parsed = match stackdeck_compose::load_compose_file(config, None, &[], None, None) {
         Ok(parsed) => parsed,
         Err(err) => {
             return vec![ServiceEntry {
@@ -471,7 +727,7 @@ fn read_stack_json_services(project: &ProjectEntry, config: &PathBuf) -> Vec<Ser
 
 fn endpoint_host(project: &ProjectEntry) -> String {
     if project.backend.eq_ignore_ascii_case("hyperv") {
-        if let Ok(cfg) = pystack_hyperv::HyperVManager::load_config() {
+        if let Ok(cfg) = stackdeck_hyperv::HyperVManager::load_config() {
             if !cfg.ssh_host.trim().is_empty() {
                 return cfg.ssh_host;
             }
@@ -644,7 +900,7 @@ fn is_service_port_reachable(host: &str, port: u16) -> bool {
 }
 
 fn collect_hyperv_overview() -> RuntimeOverview {
-    let cfg = match pystack_hyperv::HyperVManager::load_config() {
+    let cfg = match stackdeck_hyperv::HyperVManager::load_config() {
         Ok(cfg) => cfg,
         Err(err) => {
             return RuntimeOverview {
@@ -656,7 +912,7 @@ fn collect_hyperv_overview() -> RuntimeOverview {
             };
         }
     };
-    let mgr = pystack_hyperv::HyperVManager::new(cfg);
+    let mgr = stackdeck_hyperv::HyperVManager::new(cfg);
     RuntimeOverview {
         containers: mgr.container_ps().unwrap_or_else(|err| err.to_string()),
         images: mgr.image_list(false).unwrap_or_else(|err| err.to_string()),
@@ -798,19 +1054,12 @@ fn run_command_with_timeout(
         .stderr
         .take()
         .ok_or_else(|| "Could not capture command stderr.".to_string())?;
-    let stdout_reader = std::thread::spawn(move || {
-        let mut data = Vec::new();
-        let _ = stdout.read_to_end(&mut data);
-        data
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut data = Vec::new();
-        let _ = stderr.read_to_end(&mut data);
-        data
-    });
+    let stdout_reader = std::thread::spawn(move || read_bounded_stream(&mut stdout));
+    let stderr_reader = std::thread::spawn(move || read_bounded_stream(&mut stderr));
 
     let start = Instant::now();
     let mut timed_out = false;
+    let mut kill_deadline: Option<Instant> = None;
     loop {
         if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
             let stdout = stdout_reader.join().unwrap_or_default();
@@ -822,13 +1071,42 @@ fn run_command_with_timeout(
                 timed_out,
             });
         }
-        if start.elapsed() >= timeout {
+        if !timed_out && start.elapsed() >= timeout {
             timed_out = true;
             kill_process_tree(child_id);
             let _ = child.kill();
+            kill_deadline = Some(Instant::now() + Duration::from_secs(5));
+        }
+        if let Some(deadline) = kill_deadline {
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "Command timed out after {} seconds and could not be reaped within the 5-second termination grace period.",
+                    timeout.as_secs()
+                ));
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn read_bounded_stream<R: Read>(reader: &mut R) -> Vec<u8> {
+    const MAX_CAPTURE_BYTES: usize = 256 * 1024;
+    let mut captured = Vec::with_capacity(MAX_CAPTURE_BYTES);
+    let mut chunk = [0_u8; 8192];
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => {
+                captured.extend_from_slice(&chunk[..read]);
+                if captured.len() > MAX_CAPTURE_BYTES {
+                    let excess = captured.len() - MAX_CAPTURE_BYTES;
+                    captured.drain(..excess);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    captured
 }
 
 fn kill_process_tree(pid: u32) {
@@ -928,10 +1206,6 @@ fn find_hive_exe() -> Option<PathBuf> {
             exe_dir
                 .join("bin")
                 .join("stackdeck-hive-x86_64-pc-windows-msvc.exe"),
-            exe_dir.join("hive.exe"),
-            exe_dir.join("hive"),
-            exe_dir.join("bin").join("hive.exe"),
-            exe_dir.join("bin").join("hive"),
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("bin")
                 .join("stackdeck-hive.exe"),
@@ -944,14 +1218,14 @@ fn find_hive_exe() -> Option<PathBuf> {
                 .join("..")
                 .join("target")
                 .join("debug")
-                .join("hive.exe"),
+                .join("stackdeck-hive.exe"),
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("..")
                 .join("..")
                 .join("..")
                 .join("target")
                 .join("release")
-                .join("hive.exe"),
+                .join("stackdeck-hive.exe"),
         ] {
             if candidate.is_file() {
                 return Some(candidate);
@@ -997,6 +1271,8 @@ fn main() {
             clear_project_volumes,
             unregister_project,
             hyperv_health,
+            runtime_setup_status,
+            provision_runtime,
             open_service_url,
             system_stats
         ])

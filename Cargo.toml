@@ -1,22 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/pystack-types",
-    "crates/pystack-compose",
-    "crates/pystack-state",
-    "crates/pystack-process",
-    "crates/pystack-hyperv",
-    "crates/pystack-api",
-    "crates/pystack-gui",
-    "crates/pystack-desktop",
-    "crates/pystack-cli",
+    "crates/stackdeck-types",
+    "crates/stackdeck-compose",
+    "crates/stackdeck-state",
+    "crates/stackdeck-process",
+    "crates/stackdeck-hyperv",
+    "crates/stackdeck-api",
+    "crates/stackdeck-cli",
     "desktop/stackdeck/src-tauri",
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 license = "MIT"
 
 [workspace.dependencies]
@@ -50,8 +48,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
 
 # Templates
-askama = "0.12"
-eframe = "0.27"
 tauri = "=2.5.1"
 tauri-build = "=2.2.0"
 
@@ -60,15 +56,17 @@ subtle = "2"
 sha2 = "0.10"
 rand = "0.8"
 windows-sys = "0.59"
+base64 = "0.22"
+futures-util = "0.3"
+fs2 = "0.4"
 
 # Internal crates
-pystack-types = { path = "crates/pystack-types" }
-pystack-compose = { path = "crates/pystack-compose" }
-pystack-state = { path = "crates/pystack-state" }
-pystack-process = { path = "crates/pystack-process" }
-pystack-hyperv = { path = "crates/pystack-hyperv" }
-pystack-api = { path = "crates/pystack-api" }
-pystack-gui = { path = "crates/pystack-gui" }
+stackdeck-types = { path = "crates/stackdeck-types" }
+stackdeck-compose = { path = "crates/stackdeck-compose" }
+stackdeck-state = { path = "crates/stackdeck-state" }
+stackdeck-process = { path = "crates/stackdeck-process" }
+stackdeck-hyperv = { path = "crates/stackdeck-hyperv" }
+stackdeck-api = { path = "crates/stackdeck-api" }
 
 [profile.release]
 strip = true

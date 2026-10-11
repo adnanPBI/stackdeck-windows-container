@@ -37,6 +37,16 @@ type RuntimeOverview = {
   vm_health: string;
 };
 
+type RuntimeSetupStatus = {
+  ready: boolean;
+  vm_name: string;
+  vm_root: string;
+  disk_gb: number;
+  vhdx_path: string | null;
+  recommended_vm_root: string;
+  smb_enabled: boolean;
+};
+
 type CommandResult = {
   exit_code: number;
   stdout: string;
@@ -1096,6 +1106,124 @@ function SettingsView({
 }
 
 /* ─── App ──────────────────────────────────────────────────────────── */
+function RuntimeSetupView({
+  overview,
+  runtime,
+  runtimeError,
+  provisioning,
+  onProvision,
+  onRetry,
+}: {
+  overview: RuntimeOverview;
+  runtime: RuntimeSetupStatus | null;
+  runtimeError: string;
+  provisioning: boolean;
+  onProvision: (vmRoot: string, diskGb: number) => void;
+  onRetry: () => void;
+}) {
+  const [vmRoot, setVmRoot] = useState("");
+  const [diskGb, setDiskGb] = useState(8);
+
+  useEffect(() => {
+    if (!runtime) return;
+    setVmRoot(runtime.ready ? runtime.vm_root : runtime.recommended_vm_root);
+    setDiskGb(runtime.ready ? runtime.disk_gb : 8);
+  }, [runtime]);
+
+  if (!runtime) {
+    return (
+      <section className="runtime-setup-view">
+        <div className="runtime-setup-header">
+          <div>
+            <h2>Hyper-V runtime</h2>
+            <p>{runtimeError || "Loading runtime configuration…"}</p>
+          </div>
+          <span className="runtime-state not-ready">{runtimeError ? "Needs attention" : "Loading"}</span>
+        </div>
+        {runtimeError && (
+          <article className="runtime-requirements">
+            <strong>Runtime configuration could not be loaded</strong>
+            <p>StackDeck did not replace or discard the existing configuration. Correct the reported problem and retry.</p>
+            <button className="btn-refresh" onClick={onRetry} type="button">
+              <IconRefresh size={14} />
+              Retry
+            </button>
+          </article>
+        )}
+      </section>
+    );
+  }
+
+  return (
+    <section className="runtime-setup-view">
+      <div className="runtime-setup-header">
+        <div>
+          <h2>{runtime.ready ? "Hyper-V runtime" : "Set up local runtime"}</h2>
+          <p>
+            {runtime.ready
+              ? "StackDeck is using a local dynamically expanding Hyper-V disk."
+              : "Choose where StackDeck stores its Linux VM disk. Setup requests Windows elevation only for Hyper-V provisioning."}
+          </p>
+        </div>
+        <span className={'runtime-state ' + (runtime.ready ? "ready" : "not-ready")}>
+          {runtime.ready ? "Ready" : "Not initialized"}
+        </span>
+      </div>
+
+      <article className="runtime-setup-card">
+        <div className="runtime-setup-card-title">
+          <IconHardDrive size={16} />
+          <h3>Virtual disk location</h3>
+        </div>
+        <label className="runtime-field">
+          <span>VM folder</span>
+          <input
+            value={vmRoot}
+            onChange={(event) => setVmRoot(event.target.value)}
+            disabled={provisioning || runtime.ready}
+            placeholder="C:\StackDeck\VMs\stackdeck-linux"
+            spellCheck={false}
+          />
+          <small>Use a local drive folder. StackDeck creates the folder and its dynamic VHDX inside it.</small>
+        </label>
+        <label className="runtime-field runtime-size-field">
+          <span>Maximum disk size (GB)</span>
+          <input
+            type="number"
+            min="8"
+            max="2048"
+            value={diskGb}
+            onChange={(event) => setDiskGb(Number(event.target.value))}
+            disabled={provisioning || runtime.ready}
+          />
+          <small>The VHDX is dynamic: 8 GB is its capacity, not its initial physical size.</small>
+        </label>
+        {runtime.ready ? (
+          <p className="runtime-path">VHDX: {runtime.vhdx_path}</p>
+        ) : (
+          <button
+            className="btn-start-all runtime-setup-button"
+            disabled={provisioning || !vmRoot.trim() || diskGb < 8 || diskGb > 2048}
+            onClick={() => onProvision(vmRoot, diskGb)}
+            type="button"
+          >
+            <IconPlay size={13} />
+            {provisioning ? "Waiting for Windows setup…" : "Create and initialize runtime"}
+          </button>
+        )}
+      </article>
+
+      <article className="runtime-requirements">
+        <strong>What happens next</strong>
+        <p>StackDeck verifies Debian’s SHA-512 manifest, creates the VM disk, initializes the VM, and bootstraps containerd. Windows will show one UAC prompt.</p>
+        <p>Shared host folders are {runtime.smb_enabled ? "enabled." : "disabled by default, so no Windows SMB password is required. Named volumes and normal containers work without it."}</p>
+      </article>
+
+      <TextPanel title="Hyper-V health" text={overview.vm_health} onBack={() => {}} />
+    </section>
+  );
+}
+
 function App() {
   const [projects, setProjects]               = useState<ProjectEntry[]>([]);
   const [selectedProject, setSelectedProject] = useState("");
@@ -1110,6 +1238,9 @@ function App() {
   const [pendingAction, setPendingAction]     = useState("");
   const [lastUpdated, setLastUpdated]         = useState("");
   const [settings, setSettings]               = useState<AppSettings>(() => readAppSettings());
+  const [runtime, setRuntime]                 = useState<RuntimeSetupStatus | null>(null);
+  const [runtimeError, setRuntimeError]       = useState("");
+  const [provisioning, setProvisioning]       = useState(false);
   const { stats: sysStats, history: sysHistory } = useSystemStats(settings.statsRefreshSeconds * 1000);
 
   const project = useMemo(
@@ -1152,6 +1283,19 @@ function App() {
     return next;
   }, []);
 
+  const loadRuntime = useCallback(async () => {
+    setRuntimeError("");
+    try {
+      const next = await invoke<RuntimeSetupStatus>("runtime_setup_status");
+      setRuntime(next);
+      return next;
+    } catch (err) {
+      setRuntime(null);
+      setRuntimeError(formatError(err));
+      throw err;
+    }
+  }, []);
+
   const refreshAll = useCallback(async () => {
     if (isRefreshingRef.current) return;
     isRefreshingRef.current = true;
@@ -1162,6 +1306,7 @@ function App() {
       const name = selectedProject || items[0]?.name || "";
       await loadServices(name);
       await loadOverview();
+      await loadRuntime();
       setLastUpdated(new Date().toLocaleTimeString());
       setStatus("Workspace refreshed");
     } catch (err) {
@@ -1170,10 +1315,18 @@ function App() {
       setRefreshing(false);
       isRefreshingRef.current = false;
     }
-  }, [loadOverview, loadProjects, loadServices, selectedProject]);
+  }, [loadOverview, loadProjects, loadRuntime, loadServices, selectedProject]);
 
   /* ── Side Effects ── */
   useEffect(() => { refreshAll(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    loadRuntime()
+      .then((next) => {
+        if (!next.ready) setTab("VM");
+      })
+      .catch((err) => setStatus(formatError(err)));
+  }, [loadRuntime]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = settings.theme;
@@ -1333,6 +1486,36 @@ function App() {
   }
 
   /* ── Render ── */
+  async function provisionRuntime(vmRoot: string, diskGb: number) {
+    setProvisioning(true);
+    setStatus("Waiting for Windows elevation and runtime setup…");
+    setLogContext("Initialize Hyper-V runtime");
+    setLogs("Approve the Windows UAC prompt to create the StackDeck dynamic VHDX and initialize the Linux VM.");
+    try {
+      const result = await invoke<CommandResult>("provision_runtime", {
+        request: { vmRoot, diskGb },
+      });
+      const output = [
+        "exit=" + result.exit_code + (result.timed_out ? " timed_out=true" : ""),
+        result.stdout && "stdout:\n" + result.stdout,
+        result.stderr && "stderr:\n" + result.stderr,
+      ].filter(Boolean).join("\n");
+      setLogs(output || "exit=" + result.exit_code);
+      if (result.exit_code === 0) {
+        await Promise.all([loadRuntime(), loadOverview()]);
+        setStatus("Local runtime initialized");
+      } else {
+        setStatus("Runtime setup failed (exit " + result.exit_code + ")");
+      }
+    } catch (err) {
+      const message = formatError(err);
+      setLogs("Runtime setup error:\n" + message);
+      setStatus(message);
+    } finally {
+      setProvisioning(false);
+    }
+  }
+
   return (
     <main className="app-shell" data-density={settings.compactRows ? "compact" : "comfortable"}>
       {/* ── Sidebar ── */}
@@ -1487,7 +1670,16 @@ function App() {
           {tab === "Images"     && <TextPanel title="Images"        text={overview.images} onBack={() => setTab("Services")} />}
           {tab === "Volumes"    && <TextPanel title="Volumes"       text={overview.volumes} onBack={() => setTab("Services")} />}
           {tab === "Networks"   && <TextPanel title="Networks"      text={overview.networks} onBack={() => setTab("Services")} />}
-          {tab === "VM"         && <TextPanel title="Hyper-V health" text={overview.vm_health} onBack={() => setTab("Services")} />}
+          {tab === "VM"         && (
+            <RuntimeSetupView
+              overview={overview}
+              runtime={runtime}
+              runtimeError={runtimeError}
+              provisioning={provisioning}
+              onProvision={provisionRuntime}
+              onRetry={() => loadRuntime().catch((err) => setStatus(formatError(err)))}
+            />
+          )}
           {tab === "Logs"       && <TextPanel title={logContext || "Command output"} text={logs} onBack={() => setTab("Services")} />}
           {tab === "Settings"   && (
             <SettingsView

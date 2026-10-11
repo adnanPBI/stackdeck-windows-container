@@ -10,11 +10,12 @@ description = "StackDeck offline desktop control plane"
 tauri-build = { workspace = true }
 
 [dependencies]
-pystack-types = { workspace = true }
-pystack-compose = { workspace = true }
-pystack-hyperv = { workspace = true }
+stackdeck-types = { workspace = true }
+stackdeck-compose = { workspace = true }
+stackdeck-hyperv = { workspace = true }
 tauri = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+base64 = { workspace = true }
 sysinfo = "0.33"

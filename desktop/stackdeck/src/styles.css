@@ -1160,6 +1160,108 @@ button.endpoint-link::after { display: none; }
 }
 
 /* ─── Settings ───────────────────────────────────────────────────── */
+/* Runtime setup */
+.runtime-setup-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.runtime-setup-header,
+.runtime-setup-card,
+.runtime-requirements {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-sm);
+}
+
+.runtime-setup-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+}
+
+.runtime-setup-header h2 {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.2px;
+}
+
+.runtime-setup-header p,
+.runtime-requirements p {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.runtime-state {
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 800;
+  border: 1px solid var(--border-subtle);
+}
+
+.runtime-state.ready {
+  color: var(--accent-glow);
+  border-color: hsl(158 60% 40% / 0.35);
+  background: var(--accent-badge);
+}
+
+.runtime-state.not-ready {
+  color: var(--warn);
+  border-color: hsl(38 90% 55% / 0.35);
+  background: var(--warn-subtle);
+}
+
+.runtime-setup-card {
+  overflow: hidden;
+  padding-bottom: 14px;
+}
+
+.runtime-setup-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-2);
+}
+
+.runtime-setup-card-title svg { color: var(--accent-glow); }
+.runtime-setup-card-title h3 { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+
+.runtime-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 14px 0;
+}
+
+.runtime-field > span { color: var(--text-primary); font-size: 13px; font-weight: 700; }
+.runtime-field input { width: min(620px, 100%); }
+.runtime-field small,
+.runtime-path { color: var(--text-tertiary); font-size: 12px; line-height: 1.45; }
+.runtime-size-field input { width: 120px; }
+.runtime-setup-button { margin: 16px 14px 0; }
+.runtime-path { margin: 16px 14px 0; font-family: var(--font-mono); overflow-wrap: anywhere; }
+
+.runtime-requirements {
+  padding: 14px 16px;
+}
+
+.runtime-requirements strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
 .settings-view {
   display: flex;
   flex-direction: column;

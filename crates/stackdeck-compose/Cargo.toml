@@ -1,0 +1,15 @@
+[package]
+name = "stackdeck-compose"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Docker Compose YAML parser for StackDeck Runner"
+
+[dependencies]
+stackdeck-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }

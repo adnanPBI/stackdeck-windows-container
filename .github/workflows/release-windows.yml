@@ -1,0 +1,185 @@
+name: Signed Windows Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+jobs:
+  windows-release:
+    runs-on: windows-2022
+    environment: windows-release
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: npm
+          cache-dependency-path: desktop/stackdeck/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - name: Validate release version contract
+        shell: powershell
+        run: |
+          $package = Get-Content desktop/stackdeck/package.json -Raw | ConvertFrom-Json
+          $tauri = Get-Content desktop/stackdeck/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $cargoText = Get-Content Cargo.toml -Raw
+          $cargoMatch = [regex]::Match($cargoText, '(?m)^version\s*=\s*"(?<version>[^"]+)"')
+          if (-not $cargoMatch.Success) { throw 'Workspace version was not found in Cargo.toml.' }
+          $version = [string]$package.version
+          if ($tauri.version -ne $version -or $cargoMatch.Groups['version'].Value -ne $version) {
+            throw "Version mismatch: package=$version tauri=$($tauri.version) cargo=$($cargoMatch.Groups['version'].Value)"
+          }
+          if ('${{ github.ref_type }}' -eq 'tag' -and '${{ github.ref_name }}' -ne "v$version") {
+            throw "Release tag '${{ github.ref_name }}' must exactly match v$version."
+          }
+
+      - name: Materialize immutable runtime lock
+        shell: powershell
+        env:
+          RUNTIME_IMAGE_URL: ${{ vars.WINDOWS_RUNTIME_IMAGE_URL }}
+          RUNTIME_IMAGE_SHA512: ${{ vars.WINDOWS_RUNTIME_IMAGE_SHA512 }}
+          DEBIAN_SNAPSHOT_TIMESTAMP: ${{ vars.WINDOWS_DEBIAN_SNAPSHOT_TIMESTAMP }}
+          NERDCTL_VERSION: ${{ vars.WINDOWS_NERDCTL_VERSION }}
+          NERDCTL_SHA256_AMD64: ${{ vars.WINDOWS_NERDCTL_SHA256_AMD64 }}
+        run: |
+          foreach ($name in @('RUNTIME_IMAGE_URL','RUNTIME_IMAGE_SHA512','DEBIAN_SNAPSHOT_TIMESTAMP','NERDCTL_VERSION','NERDCTL_SHA256_AMD64')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Required protected release variable is missing: $name"
+            }
+          }
+          # Never silently rewrite a locked input after checking out a release tag.
+          # Protected settings must identify the exact bytes already committed.
+          $lock = Get-Content runtime/windows-runtime-lock.json -Raw | ConvertFrom-Json
+          $expected = @{
+            image_url = $env:RUNTIME_IMAGE_URL
+            image_sha512 = $env:RUNTIME_IMAGE_SHA512
+            debian_snapshot_timestamp = $env:DEBIAN_SNAPSHOT_TIMESTAMP
+            nerdctl_version = $env:NERDCTL_VERSION
+            nerdctl_sha256_amd64 = $env:NERDCTL_SHA256_AMD64
+          }
+          foreach ($key in $expected.Keys) {
+            if ([string]$lock.$key -cne [string]$expected[$key]) {
+              throw "Protected release value $key differs from the committed immutable runtime lock."
+            }
+          }
+          .\scripts\windows\13-Verify-Source-Release.ps1
+          if (@(git status --porcelain=v1 --untracked-files=all).Count -gt 0) {
+            throw 'Release source is dirty after runtime-lock verification.'
+          }
+
+      - name: Require qualified source for public release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: powershell
+        env:
+          QUALIFIED_SOURCE_COMMIT: ${{ vars.WINDOWS_QUALIFIED_SOURCE_COMMIT }}
+          QUALIFICATION_EVIDENCE_SHA256: ${{ vars.WINDOWS_QUALIFICATION_EVIDENCE_SHA256 }}
+        run: |
+          if ($env:QUALIFIED_SOURCE_COMMIT -ne '${{ github.sha }}') {
+            throw 'The protected qualification approval does not match this exact Git commit.'
+          }
+          if ($env:QUALIFICATION_EVIDENCE_SHA256 -notmatch '^[a-fA-F0-9]{64}$') {
+            throw 'An approved independent Windows qualification report SHA-256 is required.'
+          }
+          Write-Host "Qualified source: $env:QUALIFIED_SOURCE_COMMIT"
+          Write-Host "Qualification report digest: $env:QUALIFICATION_EVIDENCE_SHA256"
+
+      - name: Ensure 7-Zip
+        shell: powershell
+        run: |
+          if (-not (Get-Command 7z.exe -ErrorAction SilentlyContinue)) {
+            choco install 7zip -y --no-progress
+          }
+
+      - name: Import Authenticode certificate
+        id: cert
+        shell: powershell
+        env:
+          CERT_PFX_B64: ${{ secrets.WINDOWS_SIGNING_CERT_PFX_B64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          EXPECTED_THUMBPRINT: ${{ secrets.WINDOWS_SIGNING_CERT_THUMBPRINT }}
+        run: |
+          if (-not $env:CERT_PFX_B64 -or -not $env:CERT_PASSWORD -or -not $env:EXPECTED_THUMBPRINT) {
+            throw 'Windows signing secrets are not configured.'
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP 'stackdeck-signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_PFX_B64))
+          $secure = ConvertTo-SecureString $env:CERT_PASSWORD -AsPlainText -Force
+          $imported = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure -Exportable:$false)
+          Remove-Item $pfx -Force
+          $cert = @($imported | Where-Object { $_.Thumbprint -ieq $env:EXPECTED_THUMBPRINT }) | Select-Object -First 1
+          if (-not $cert) { throw 'Imported certificate thumbprint does not match WINDOWS_SIGNING_CERT_THUMBPRINT.' }
+          if ($cert.Subject -eq $cert.Issuer) { throw 'Self-signed developer certificates cannot publish a trusted Windows client release.' }
+          if ($cert.NotBefore -gt (Get-Date) -or $cert.NotAfter -le (Get-Date)) { throw 'Code-signing certificate is outside its validity period.' }
+          if (-not @($cert.EnhancedKeyUsageList | Where-Object { $_.FriendlyName -eq 'Code Signing' }).Count) { throw 'Certificate must permit Code Signing.' }
+          "thumbprint=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build, sign, bundle, and verify release
+        shell: powershell
+        env:
+          STACKDECK_SIGNING_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+        run: |
+          $params = @{
+            CertificateThumbprint = $env:STACKDECK_SIGNING_THUMBPRINT
+            SourceCommit = '${{ github.sha }}'
+          }
+          .\scripts\windows\09-Build-Signed-Release.ps1 @params
+
+      - name: Attest signed installers
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+
+      - name: Upload signed release
+        uses: actions/upload-artifact@v4
+        with:
+          name: stackdeck-windows-signed-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            target/release/stackdeck-cli.exe
+            target/release/stackdeck-hive.exe
+            target/signed-release/SHA256SUMS.txt
+            target/signed-release/PRE_BUNDLE_PAYLOAD_SHA256.json
+            target/signed-release/provenance.json
+
+      - name: Publish verified signed Windows release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $paths = @(
+            'target/x86_64-pc-windows-msvc/release/bundle/msi/StackDeck_*.msi',
+            'target/x86_64-pc-windows-msvc/release/bundle/nsis/StackDeck_*-setup.exe',
+            'target/release/stackdeck-cli.exe',
+            'target/release/stackdeck-hive.exe',
+            'target/signed-release/SHA256SUMS.txt',
+            'target/signed-release/PRE_BUNDLE_PAYLOAD_SHA256.json',
+            'target/signed-release/provenance.json'
+          )
+          $artifacts = @($paths | ForEach-Object { Get-ChildItem $_ -File -ErrorAction Stop } | Select-Object -ExpandProperty FullName)
+          if ($artifacts.Count -ne 7) { throw "Expected 7 verified assets, found $($artifacts.Count)." }
+          & gh release create $env:GITHUB_REF_NAME @artifacts --verify-tag --generate-notes --title "StackDeck $env:GITHUB_REF_NAME"
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed.' }

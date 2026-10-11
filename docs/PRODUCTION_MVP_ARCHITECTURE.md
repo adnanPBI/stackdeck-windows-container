@@ -3,7 +3,7 @@
 ## Runtime diagram
 
 ```text
-StackDeck UI / pystack CLI
+StackDeck UI / stackdeck CLI
         |
         | local commands / optional localhost API
         v
@@ -33,7 +33,7 @@ host docker.sock
 ## Accepted dependencies
 
 ```text
-Windows 10/11 Pro, Enterprise, or Education with Hyper-V
+Windows 11 Pro, Enterprise, or Education x86-64 with Hyper-V (Windows 10 only when separately qualified with -AllowWindows10)
 Administrator PowerShell for setup
 Hyper-V PowerShell module
 OpenSSH client
@@ -49,8 +49,8 @@ containerd + nerdctl inside VM
 | Phase | Goal | Deployable output |
 |---:|---|---|
 | 1 | Host preflight | `00-Ensure-Prereqs.ps1` |
-| 2 | Build | release `pystack.exe` / `hive.exe` |
-| 3 | Hyper-V config | D:\ VM root, 10 GB disk, memory, CPU, switch |
+| 2 | Build | release `stackdeck-cli.exe` / `stackdeck-hive.exe` |
+| 3 | Hyper-V config | `%SystemDrive%\StackDeck\VMs\stackdeck-linux`, 10 GB disk, memory, CPU, switch |
 | 4 | VM init | verified image, cloud-init, VM, SSH, bootstrap |
 | 5 | Runtime smoke | nginx container on localhost TCP |
 | 6 | API task | optional localhost Docker API shim |

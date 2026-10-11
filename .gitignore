@@ -1,34 +1,31 @@
-# Rust
-/target/
-**/target/
-Cargo.lock.bak
+# Local analysis/cache metadata
+/.graphify_detect.json
+/.graphify_python
 
-# Node / Tauri
-/desktop/stackdeck/node_modules/
+# Rust / Tauri build outputs
+/target/
 /desktop/stackdeck/dist/
-/desktop/stackdeck/src-tauri/target/
+/desktop/stackdeck/node_modules/
 /desktop/stackdeck/src-tauri/bin/*.exe
 
-# Generated artifacts
-*.exe
-*.dll
-*.pdb
-*.log
-*.tmp
-*.partial
-*.zip
-*.msi
-*.msix
-*.appx
+# Local StackDeck runtime state and smoke-test databases
+**/.stackdeck/state.db
+**/.stackdeck/*.db-shm
+**/.stackdeck/*.db-wal
 
-# Runtime state
-.pystack/
-.pystack-*/
-diagnostics*/
-*.redacted.log
-
-# OS / editor
-.DS_Store
-Thumbs.db
+# Local Windows/IDE metadata
+*.pfx
+*.p12
+*.cer
+*.pvk
+*.snk
 .vscode/
 .idea/
+.DS_Store
+Thumbs.db
+
+# Release evidence is generated from protected CI, not committed.
+/target/signed-release/
+*.zip
+*.zip.sha256
+*.manifest.sha256
