@@ -32,6 +32,14 @@ $tauri = Get-Content -LiteralPath (Join-Path $repoRoot 'desktop\stackdeck\src-ta
 if ([string]$tauri.bundle.windows.nsis.installMode -ne 'perMachine') {
   throw 'NSIS installMode must be perMachine so installed-client tooling and Program Files layout agree.'
 }
+# Explicit Tauri target is mandatory: CARGO_BUILD_TARGET does not guarantee
+# where `tauri bundle` writes installers when called as a separate command.
+$npmPackage = Get-Content -LiteralPath (Join-Path $repoRoot 'desktop\stackdeck\package.json') -Raw | ConvertFrom-Json
+foreach ($scriptName in @('build:hive','build:desktop-release','bundle:windows')) {
+  if ([string]$npmPackage.scripts.$scriptName -notmatch '--target\s+x86_64-pc-windows-msvc(?:\s|$)') {
+    throw "Tauri script $scriptName must explicitly select the canonical Windows MSVC target."
+  }
+}
 
 $lockPath = Join-Path $repoRoot 'runtime\windows-runtime-lock.json'
 $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json

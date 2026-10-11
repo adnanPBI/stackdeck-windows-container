@@ -57,9 +57,14 @@ $osOk = ($arch -match '64') -and $editionOk -and ($is11 -or ($AllowWindows10 -an
 Add-Check "Supported Windows baseline" $osOk "$caption; architecture=$arch; AllowWindows10=$AllowWindows10"
 
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+$hypervisor = [bool](Get-CimInstance Win32_ComputerSystem).HypervisorPresent
 if ($cpu) {
-  Add-Check "Hardware virtualization" ([bool]$cpu.VirtualizationFirmwareEnabled) "VirtualizationFirmwareEnabled=$($cpu.VirtualizationFirmwareEnabled)"
-  Add-Check "SLAT" ([bool]$cpu.SecondLevelAddressTranslationExtensions) "SecondLevelAddressTranslationExtensions=$($cpu.SecondLevelAddressTranslationExtensions)"
+  # Windows may mask raw CPU virtualization / SLAT flags once the hypervisor
+  # is running. Feature state, switch and live VM tests remain separate gates.
+  $hardwareOk = ([bool]$cpu.VirtualizationFirmwareEnabled -or $hypervisor)
+  $slatOk = ([bool]$cpu.SecondLevelAddressTranslationExtensions -or $hypervisor)
+  Add-Check "Hardware virtualization" $hardwareOk "Firmware=$($cpu.VirtualizationFirmwareEnabled); HypervisorPresent=$hypervisor"
+  Add-Check "SLAT" $slatOk "ProcessorSLAT=$($cpu.SecondLevelAddressTranslationExtensions); HypervisorPresent=$hypervisor"
 }
 
 if ($EnableFeatures) {

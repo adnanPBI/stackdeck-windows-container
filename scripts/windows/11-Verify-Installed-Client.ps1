@@ -23,7 +23,7 @@ if (-not $InstallRoot) {
   }
   $InstallRoot = $candidates[0]
 }
-$InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
+$InstallRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallRoot)
 if ($SkipSignature) {
   Write-Warning "Signature verification is skipped for PRE-SIGNING FUNCTIONAL QUALIFICATION only. This evidence is not final client-release evidence."
 }
@@ -138,7 +138,7 @@ $summary = [ordered]@{
   checks = @($results)
 }
 
-$outputPath = [IO.Path]::GetFullPath($Output)
+$outputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 [IO.Directory]::CreateDirectory((Split-Path -Parent $outputPath)) | Out-Null
 [IO.File]::WriteAllText($outputPath, ($summary | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
 $results | Format-Table -AutoSize

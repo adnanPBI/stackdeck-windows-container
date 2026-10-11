@@ -16,7 +16,7 @@ $Version = [string]((Get-Content -LiteralPath (Join-Path $RepoRoot "desktop\stac
 if (-not $OutputRoot) {
   $OutputRoot = Join-Path $RepoRoot "target\local-go"
 }
-$OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
+$OutputRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputRoot)
 $PackageName = "StackDeck-v$Version-Windows-x64-LOCAL-GO"
 $PackageDir = Join-Path $OutputRoot $PackageName
 $PackageZip = Join-Path $OutputRoot "$PackageName.zip"

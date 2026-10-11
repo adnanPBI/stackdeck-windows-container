@@ -41,8 +41,11 @@ function Resolve-GitSourceManifest {
   return $files
 }
 
+# Windows PowerShell 5.1 does not reliably load ZipArchive with FileSystem alone.
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$outputPath = [IO.Path]::GetFullPath($OutputZip)
+# Resolve against the caller's PowerShell location, not the MCP host process CWD.
+$outputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputZip)
 if (Test-Path -LiteralPath $outputPath) { Remove-Item -LiteralPath $outputPath -Force }
 [IO.Directory]::CreateDirectory((Split-Path -Parent $outputPath)) | Out-Null
 
@@ -94,11 +97,29 @@ try {
   } finally { $zip.Dispose() }
 } finally { $stream.Dispose() }
 
+# Re-open the emitted archive and hash every entry against its exact source
+# file, not merely the three well-known hidden release paths.
+$expectedHashes = @{}
+foreach ($file in $files) {
+  $relative = $file.FullName.Substring($repoRoot.Length).TrimStart('\').Replace('\','/')
+  $expectedHashes[$relative] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 $archive = [IO.Compression.ZipFile]::OpenRead($outputPath)
 try {
   $names = @($archive.Entries | ForEach-Object FullName)
-  foreach ($mustHave in @('.github/workflows/release-windows.yml', '.gitignore', 'runtime/windows-runtime-lock.json')) {
+  if ($names.Count -ne $expectedHashes.Count -or @($names | Select-Object -Unique).Count -ne $names.Count) {
+    throw 'Packaged source entry count differs from the Git manifest (missing or duplicate files).'
+  }
+  foreach ($mustHave in @('.github/workflows/release-windows.yml', '.gitignore', 'LICENSE', 'runtime/windows-runtime-lock.json')) {
     if ($names -notcontains $mustHave) { throw "Packaged source archive dropped required path: $mustHave" }
+  }
+  foreach ($entry in $archive.Entries) {
+    if (-not $expectedHashes.ContainsKey($entry.FullName)) { throw "Unexpected source archive entry: $($entry.FullName)" }
+    $reader = $entry.Open()
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $actual = [BitConverter]::ToString($sha.ComputeHash($reader)).Replace('-','').ToLowerInvariant() }
+    finally { $reader.Dispose(); $sha.Dispose() }
+    if ($actual -ne $expectedHashes[$entry.FullName]) { throw "Source archive payload hash mismatch: $($entry.FullName)" }
   }
 } finally { $archive.Dispose() }
 

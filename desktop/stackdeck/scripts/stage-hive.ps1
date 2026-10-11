@@ -4,7 +4,7 @@ $TargetTriple = "x86_64-pc-windows-msvc"
 $DesktopRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).ProviderPath
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $DesktopRoot "..\..")).ProviderPath
 $BinDir = Join-Path $DesktopRoot "src-tauri\bin"
-$SourceExe = Join-Path $RepoRoot "target\release\stackdeck-hive.exe"
+$SourceExe = Join-Path $RepoRoot "target\$TargetTriple\release\stackdeck-hive.exe"
 $SuffixedExe = Join-Path $BinDir "stackdeck-hive-$TargetTriple.exe"
 $UnsuffixedExe = Join-Path $BinDir "stackdeck-hive.exe"
 

@@ -185,16 +185,21 @@ $results.Add([pscustomobject]@{
 })
 
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+$hypervisorPresent = [bool](Get-CimInstance Win32_ComputerSystem).HypervisorPresent
 if ($cpu) {
+  # A running hypervisor may mask the processor feature flags.
+  # Hyper-V installation, switch discovery and real VM health are separate gates.
+  $virtualization = ([bool]$cpu.VirtualizationFirmwareEnabled -or $hypervisorPresent)
+  $slat = ([bool]$cpu.SecondLevelAddressTranslationExtensions -or $hypervisorPresent)
   $results.Add([pscustomobject]@{
     Check = "Hardware virtualization"
-    Status = $(if($cpu.VirtualizationFirmwareEnabled){"OK"}else{"MISSING"})
-    Detail = "VirtualizationFirmwareEnabled=$($cpu.VirtualizationFirmwareEnabled)"
+    Status = $(if($virtualization){"OK"}else{"MISSING"})
+    Detail = "VirtualizationFirmwareEnabled=$($cpu.VirtualizationFirmwareEnabled); HypervisorPresent=$hypervisorPresent"
   })
   $results.Add([pscustomobject]@{
     Check = "SLAT"
-    Status = $(if($cpu.SecondLevelAddressTranslationExtensions){"OK"}else{"MISSING"})
-    Detail = "SecondLevelAddressTranslationExtensions=$($cpu.SecondLevelAddressTranslationExtensions)"
+    Status = $(if($slat){"OK"}else{"MISSING"})
+    Detail = "SecondLevelAddressTranslationExtensions=$($cpu.SecondLevelAddressTranslationExtensions); HypervisorPresent=$hypervisorPresent"
   })
 }
 
@@ -207,14 +212,14 @@ if ($EnableFeatures) {
   }
 }
 
-$feature = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction SilentlyContinue
+$feature = try { Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -ErrorAction Stop } catch { $null }
 $featureStatus = if ($feature -and $feature.State -eq "Enabled") { "OK" } else { "MISSING" }
 $featureDetail = if ($feature) { "Windows optional feature state: $($feature.State)" } else { "Unable to query Windows optional feature state" }
 $results.Add([pscustomobject]@{ Check = "Microsoft-Hyper-V-All"; Status = $featureStatus; Detail = $featureDetail })
 $results.Add((Check-Command "New-VM" $true))
 $results.Add((Check-Command "Resize-VHD" $true))
 $results.Add((Check-Command "Convert-VHD" $true))
-$defaultSwitch = Get-VMSwitch -Name "Default Switch" -ErrorAction SilentlyContinue
+$defaultSwitch = try { Get-VMSwitch -Name "Default Switch" -ErrorAction Stop } catch { $null }
 $results.Add([pscustomobject]@{ Check = "Hyper-V Default Switch"; Status = $(if($defaultSwitch){"OK"}else{"MISSING"}); Detail = $(if($defaultSwitch){$defaultSwitch.Name}else{"Required by the default StackDeck configuration"}) })
 $results.Add((Check-Command "ssh" $true))
 $results.Add((Check-Command "scp" $true))
