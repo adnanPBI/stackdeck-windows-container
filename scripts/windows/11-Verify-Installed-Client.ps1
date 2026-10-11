@@ -112,7 +112,8 @@ if ($hive.Count -eq 1) {
   Add-Check "nerdctl runtime usability" ($ps.ExitCode -eq 0) $ps.Output
 }
 
-$configRoot = Join-Path (Join-Path $env:ProgramData "StackDeck") "config"
+$machineDataRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+$configRoot = Join-Path (Join-Path $machineDataRoot "StackDeck") "config"
 $configPath = Join-Path $configRoot "hyperv.json"
 $secretPath = Join-Path $configRoot "smb-password.dpapi"
 Add-Check "Machine-scoped config root" (Test-Path -LiteralPath $configRoot -PathType Container) $configRoot

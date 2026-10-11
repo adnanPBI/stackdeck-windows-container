@@ -55,9 +55,12 @@ if ($Msi.Count -ne 1 -or $Nsis.Count -ne 1) {
 if (-not $SevenZip) {
   $SevenZip = Resolve-ApplicationPath @("7z.exe", "7za.exe")
   if (-not $SevenZip) {
+    # Some non-interactive Windows agents omit ProgramData/ChocolateyInstall.
+    $commonAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
     foreach ($candidate in @(
       "$env:ProgramFiles\7-Zip\7z.exe",
       "${env:ProgramFiles(x86)}\7-Zip\7z.exe",
+      "$commonAppData\chocolatey\tools\7z.exe",
       "$env:ChocolateyInstall\tools\7z.exe"
     )) {
       if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
@@ -94,10 +97,39 @@ try {
     [IO.Directory]::CreateDirectory($dest) | Out-Null
     Invoke-NativeChecked -FilePath $SevenZip -ArgumentList @("x", "-y", "-o$dest", $installer.FullName)
 
-    $desktop = @(Get-ChildItem -LiteralPath $dest -Filter "stackdeck.exe" -File -Recurse -ErrorAction SilentlyContinue)
-    $hive = @(Get-ChildItem -LiteralPath $dest -Filter "stackdeck-hive*.exe" -File -Recurse -ErrorAction SilentlyContinue)
-    if ($desktop.Count -lt 1 -or $hive.Count -lt 1) {
-      throw "Could not locate StackDeck desktop and hive payloads after extracting $($installer.Name)."
+    if ($installer.Extension -ieq ".msi") {
+      # Windows Installer stores its app executables in an embedded CAB.
+      # WiX may rename them to opaque File-table keys (e.g. Path, Bin_*).
+      # Identify them by exact trusted pre-bundle SHA-256, never by CAB names.
+      $cabs = @(Get-ChildItem -LiteralPath $dest -Filter "*.cab" -File -Recurse -ErrorAction SilentlyContinue)
+      if ($cabs.Count -ne 1) { throw "Expected exactly one application CAB in $($installer.Name); found $($cabs.Count)." }
+      $cabDest = Join-Path $dest "__stackdeck_msi_payload"
+      [IO.Directory]::CreateDirectory($cabDest) | Out-Null
+      Invoke-NativeChecked -FilePath $SevenZip -ArgumentList @("x", "-y", "-o$cabDest", $cabs[0].FullName)
+      $cabFiles = @(Get-ChildItem -LiteralPath $cabDest -File -Recurse -ErrorAction SilentlyContinue)
+      if ($cabFiles.Count -ne 2) { throw "Expected exactly two application payload files in MSI CAB; found $($cabFiles.Count)." }
+      $hashed = @($cabFiles | ForEach-Object {
+        [pscustomobject]@{ File = $_; Sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+      })
+      $desktopMatch = @($hashed | Where-Object { $_.Sha256 -eq $expectedDesktop })
+      $hiveMatch = @($hashed | Where-Object { $expectedHive -contains $_.Sha256 })
+      if ($desktopMatch.Count -ne 1 -or $hiveMatch.Count -ne 1) {
+        throw "MSI CAB payload hash mismatch for $($installer.Name); the embedded desktop or hive is not the exact signed build."
+      }
+      # Give the extracted signed PE payloads canonical names for signtool and
+      # Authenticode, while retaining hash identity with the original CAB bytes.
+      $desktopPath = Join-Path $cabDest "stackdeck.exe"
+      $hivePath = Join-Path $cabDest "stackdeck-hive.exe"
+      Copy-Item -LiteralPath $desktopMatch[0].File.FullName -Destination $desktopPath -Force
+      Copy-Item -LiteralPath $hiveMatch[0].File.FullName -Destination $hivePath -Force
+      $desktop = @(Get-Item -LiteralPath $desktopPath)
+      $hive = @(Get-Item -LiteralPath $hivePath)
+    } else {
+      $desktop = @(Get-ChildItem -LiteralPath $dest -Filter "stackdeck.exe" -File -Recurse -ErrorAction SilentlyContinue)
+      $hive = @(Get-ChildItem -LiteralPath $dest -Filter "stackdeck-hive*.exe" -File -Recurse -ErrorAction SilentlyContinue)
+    }
+    if ($desktop.Count -ne 1 -or $hive.Count -ne 1) {
+      throw "Expected exactly one StackDeck desktop and one hive payload in $($installer.Name)."
     }
     foreach ($payload in $desktop) {
       $actual = (Get-FileHash -LiteralPath $payload.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
