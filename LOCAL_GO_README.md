@@ -28,7 +28,7 @@ The complete local package is written under:
 target\local-go\StackDeck-v0.6.0-Windows-x64-LOCAL-GO.zip
 ```
 
-That archive contains the MSI, NSIS installer, CLI/hive binaries, immutable runtime lock, SHA-256 manifest, provenance, and installed-client qualification scripts.
+That archive contains the MSI, NSIS installer, CLI/hive binaries, immutable runtime lock, SHA-256 manifest, provenance, first-run and installed-client qualification scripts, and a runnable Compose smoke example.
 
 ## Install and initialize
 
@@ -54,6 +54,42 @@ After runtime initialization, run from Administrator PowerShell:
 
 Then execute the smoke and diagnostics gates described in `docs\LOCAL_DEPLOYMENT_WINDOWS.md`.
 
+## Qualify directly from the extracted LOCAL-GO ZIP
+
+The archive is also a standalone Windows **pre-signing test bundle**, without Rust/Node source tooling.
+Use a disposable, dedicated **Windows 11 Pro/Enterprise/Education x64 Hyper-V test workstation**, not a host containing valuable registered VMs. Open an elevated PowerShell window, extract the ZIP, and work inside the extracted package root.
+
+~~~powershell
+Set-Location 'C:\StackDeck-Qualification'
+.\qualification\16-Ensure-Prebuilt-Runtime-Prereqs.ps1
+~~~
+
+The gate must pass before installation. It checks Hyper-V, the Default Switch, SSH, and qemu-img. Install **one** of the unsigned MSI or NSIS packages from the installers directory, recording installer logs. Never publish or promote unsigned local test media.
+
+For the MSI route, a test administrator can use:
+
+~~~powershell
+msiexec.exe /i '.\installers\StackDeck_0.6.0_x64_en-US.msi' /L*v '.\stackdeck-msi-install.log'
+~~~
+
+First-run initialization through the app's **VM** screen is supported. The matching scripted route automatically resolves the pinned runtime lock from the extracted package:
+
+~~~powershell
+.\qualification\08-Initialize-Installed-Runtime.ps1
+~~~
+
+The script refuses VM creation when the Hyper-V inventory cannot be enumerated, the chosen name is already registered, or a virtual disk already exists. It never automatically deletes an existing VM.
+
+After the runtime is initialized and healthy, run:
+
+~~~powershell
+.\qualification\11-Verify-Installed-Client.ps1 -InstallRoot 'C:\Program Files\StackDeck' -SkipSignature -Output '.\installed-client-evidence.json'
+.\qualification\04-Smoke-Test.ps1 -StackDeckExe '.\cli\stackdeck-cli.exe' -ComposeFile '.\examples\smoke\docker-compose.yml'
+~~~
+
+The Compose smoke test starts a test Nginx container, checks runtime status and localhost HTTP 200, and stops it afterward. Keep signed-release trust and MSI/NSIS repair/upgrade/uninstall checks separate. Repeat final installed-client qualification **without -SkipSignature** only after obtaining a trusted organizational code-signing certificate.
+
+If any prerequisite is blocked, retain the diagnostic evidence. Do not delete or recreate an unknown VM to make a gate pass.
 ## Production/public release
 
 The local package is deliberately **unsigned** and is for local functional qualification. A publishable client release must use `scripts\windows\09-Build-Signed-Release.ps1` or the protected `.github\workflows\release-windows.yml`, followed by clean-machine qualification **without** `-SkipSignature`.

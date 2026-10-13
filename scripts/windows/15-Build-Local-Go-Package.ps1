@@ -93,15 +93,18 @@ if (Test-Path -LiteralPath $PackageDir) { Remove-Item -LiteralPath $PackageDir -
 [IO.Directory]::CreateDirectory((Join-Path $PackageDir "cli")) | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $PackageDir "runtime")) | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $PackageDir "qualification")) | Out-Null
+[IO.Directory]::CreateDirectory((Join-Path $PackageDir "examples\smoke")) | Out-Null
 
 Copy-RequiredFile $msi[0].FullName (Join-Path $PackageDir "installers\$($msi[0].Name)")
 Copy-RequiredFile $nsis[0].FullName (Join-Path $PackageDir "installers\$($nsis[0].Name)")
 Copy-RequiredFile $cli (Join-Path $PackageDir "cli\stackdeck-cli.exe")
 Copy-RequiredFile $hiveCompat (Join-Path $PackageDir "cli\stackdeck-hive.exe")
 Copy-RequiredFile (Join-Path $RepoRoot "runtime\windows-runtime-lock.json") (Join-Path $PackageDir "runtime\windows-runtime-lock.json")
+Copy-RequiredFile (Join-Path $PSScriptRoot "04-Smoke-Test.ps1") (Join-Path $PackageDir "qualification\04-Smoke-Test.ps1")
 Copy-RequiredFile (Join-Path $PSScriptRoot "08-Initialize-Installed-Runtime.ps1") (Join-Path $PackageDir "qualification\08-Initialize-Installed-Runtime.ps1")
 Copy-RequiredFile (Join-Path $PSScriptRoot "11-Verify-Installed-Client.ps1") (Join-Path $PackageDir "qualification\11-Verify-Installed-Client.ps1")
 Copy-RequiredFile (Join-Path $PSScriptRoot "16-Ensure-Prebuilt-Runtime-Prereqs.ps1") (Join-Path $PackageDir "qualification\16-Ensure-Prebuilt-Runtime-Prereqs.ps1")
+Copy-RequiredFile (Join-Path $RepoRoot "examples\smoke\docker-compose.yml") (Join-Path $PackageDir "examples\smoke\docker-compose.yml")
 Copy-RequiredFile (Join-Path $RepoRoot "LOCAL_GO_README.md") (Join-Path $PackageDir "README.md")
 
 $gitCommit = ""

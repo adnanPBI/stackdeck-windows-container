@@ -29,7 +29,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 if (-not $RuntimeLockPath) {
-  $RuntimeLockPath = Join-Path (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).ProviderPath "runtime\windows-runtime-lock.json"
+  # Standalone LOCAL-GO ZIP: qualification\ beside runtime\.
+  # Source layout: scripts\windows\ with runtime\ two directories above.
+  $lockCandidates = @(
+    (Join-Path $PSScriptRoot "..\runtime\windows-runtime-lock.json"),
+    (Join-Path $PSScriptRoot "..\..\runtime\windows-runtime-lock.json")
+  )
+  $found = @($lockCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1)
+  if ($found.Count -ne 1) { throw "Pinned runtime lock not found in source checkout or extracted qualification package." }
+  $RuntimeLockPath = (Resolve-Path -LiteralPath $found[0]).ProviderPath
 }
 function Get-RuntimeLock {
   if (-not (Test-Path -LiteralPath $RuntimeLockPath -PathType Leaf)) { throw "Runtime lock was not found: $RuntimeLockPath" }
@@ -92,32 +100,50 @@ if (-not (Test-Path -LiteralPath $HiveExe -PathType Leaf)) {
   throw "Installed StackDeck sidecar was not found: $HiveExe"
 }
 $ResolvedHive = (Resolve-Path -LiteralPath $HiveExe).ProviderPath
-$env:STACKDECK_CONFIG_DIR = Initialize-StackDeckMachineConfigRoot
 
 if (-not [IO.Path]::IsPathRooted($VmRoot) -or $VmRoot.StartsWith("\\")) {
   throw "VM root must be an absolute local-drive path: $VmRoot"
 }
 $VmRoot = [IO.Path]::GetFullPath($VmRoot)
-[IO.Directory]::CreateDirectory($VmRoot) | Out-Null
-
-if (-not (Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue)) {
+if (-not (Get-VMSwitch -Name $SwitchName -ErrorAction Stop)) {
   throw "Hyper-V switch '$SwitchName' was not found."
 }
 
-$existingVm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
-if ($existingVm) {
-  $diskPaths = @(Get-VMHardDiskDrive -VMName $VmName -ErrorAction SilentlyContinue |
-      ForEach-Object Path |
-      Where-Object { $_ })
-  $missingDisk = $diskPaths.Count -eq 0 -or
-    @($diskPaths | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -gt 0
-  if (-not $missingDisk) {
-    throw "VM '$VmName' already exists with an attached disk. Refusing to overwrite it."
-  }
-  Write-Host "Removing stale VM '$VmName' because its attached VHDX is missing..."
-  Stop-VM -Name $VmName -TurnOff -Force -ErrorAction SilentlyContinue
-  Remove-VM -Name $VmName -Force
+# An inaccessible/corrupt Get-VM MUST NOT mean that the VM is absent.
+# NEVER auto-delete a VM, its configuration, or its virtual disks.
+try {
+  $inventory = @(Get-VM -ErrorAction Stop)
+} catch {
+  throw "Hyper-V inventory is unhealthy. Refusing VM initialization until registered VMs are repaired and backed up. $($_.Exception.Message)"
 }
+try {
+  $cimRegistered = @(Get-CimInstance -Namespace "root\virtualization\v2" -ClassName Msvm_ComputerSystem -ErrorAction Stop |
+    Where-Object { $_.Caption -eq "Virtual Machine" -and $_.ElementName -eq $VmName })
+} catch {
+  throw "Hyper-V CIM registration lookup failed. Refusing VM initialization: $($_.Exception.Message)"
+}
+if ($cimRegistered.Count -gt 0 -or @($inventory | Where-Object { $_.Name -eq $VmName }).Count -gt 0) {
+  throw "VM '$VmName' is already registered. Refusing automated removal or disk replacement. Back up and resolve its lifecycle manually."
+}
+$vmDisk = Join-Path $VmRoot "$VmName.vhdx"
+if (Test-Path -LiteralPath $vmDisk -PathType Leaf) {
+  throw "Pre-existing virtual disk found at '$vmDisk'. Refusing to overwrite it."
+}
+if (Test-Path -LiteralPath $VmRoot -PathType Container) {
+  $otherDisks = @(Get-ChildItem -LiteralPath $VmRoot -Filter '*.vhdx' -File -ErrorAction Stop)
+  if ($otherDisks.Count -gt 0) {
+    throw "VM root '$VmRoot' already contains virtual disks. Refusing to reuse it."
+  }
+}
+foreach ($artifact in @((Join-Path $VmRoot "seed.iso"), (Join-Path $VmRoot "seed.vhdx"))) {
+  if (Test-Path -LiteralPath $artifact -PathType Leaf) {
+    throw "Existing cloud-init artifact '$artifact' would be overwritten. Refusing initialization."
+  }
+}
+if (Test-Path -LiteralPath (Join-Path $VmRoot "seed") -PathType Container) {
+  throw "Existing cloud-init seed directory found. Refusing initialization to preserve prior data."
+}
+# Defer machine-config and VM-root mutation until read-only guards pass.
 
 if (-not $ImageUrl) {
   $lock = Get-RuntimeLock
@@ -130,6 +156,10 @@ if (-not [Uri]::TryCreate($ImageUrl, [UriKind]::Absolute, [ref]$parsedImageUri) 
 }
 if (-not $ImageSha512) { throw "-ImageSha512 or a release runtime lock is required." }
 $sha512 = $ImageSha512.ToLowerInvariant()
+
+# No machine state is touched before inventory, disk and lock validations pass.
+$env:STACKDECK_CONFIG_DIR = Initialize-StackDeckMachineConfigRoot
+[IO.Directory]::CreateDirectory($VmRoot) | Out-Null
 
 Invoke-Hive -ArgumentList @(
   "hyperv", "configure",

@@ -59,6 +59,10 @@ foreach ($mustHave in @(
     'scripts/windows/09-Build-Signed-Release.ps1',
     'scripts/windows/13-Verify-Source-Release.ps1',
     'scripts/windows/14-Package-Source-Handover.ps1',
+    'scripts/windows/04-Smoke-Test.ps1',
+    'scripts/windows/08-Initialize-Installed-Runtime.ps1',
+    'LOCAL_GO_README.md',
+    'examples/smoke/docker-compose.yml',
     'scripts/windows/17-Elevated-Release-Preflight.ps1',
     'docs/WINDOWS_RELEASE_QUALIFICATION_2026-10-13.md'
   )) {

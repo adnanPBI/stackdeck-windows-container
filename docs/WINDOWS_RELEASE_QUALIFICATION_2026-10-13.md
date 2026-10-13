@@ -44,3 +44,13 @@ Both installers were unpacked using 7-Zip 26.04. MSI nested CAB and NSIS payload
 - Elevated Hyper-V VM lifecycle and clean installed-client qualification: NOT completed.
 - Independent clean-machine signature verification: NOT completed.
 - GitHub public publication: NOT completed; this local Git repository does not have a remote.
+
+## Subsequent RC5 safety remediation and standalone package improvements
+- A dangerous legacy behavior in scripts/windows/08-Initialize-Installed-Runtime.ps1 was identified: stale VM disk detection previously triggered automatic Stop-VM and Remove-VM.
+- This behavior has been removed. Initialization now reads Get-VM with ErrorAction Stop, cross-checks CIM registration and existing disks, then refuses to alter any registered or data-bearing VM.
+- Both Rust VM creation entry points now run the same independent strict CIM/PowerShell/VHDX preflight before mutation and repeat their guard inside the actual create command to mitigate time-of-check/time-of-use races.
+- New Rust regression test for the shared guard passed (26 Hyper-V crate tests).
+- An elevated read-only test against the host's damaged stackdeck-linux registration returned a controlled fail-closed error; no test VM directory or config environment changes were observed. Evidence: target/release-evidence/rc5-hyperv-fail-closed-test.json.
+- Standalone LOCAL-GO package updated to include the Compose smoke test script and its dedicated example, and to resolve the immutable runtime lock inside the extracted ZIP.
+- The RND host remains unqualified for running VMs until the two orphaned Hyper-V registrations are separately recovered with backup evidence and signoff. None was deleted or reset.
+- No publicly trusted publisher code-signing certificate has been provided; no signed public release is authorized.

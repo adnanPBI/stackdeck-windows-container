@@ -10,6 +10,31 @@ pub use stackdeck_types::{HyperVConfig, HyperVService};
 /// remains ten GiB.
 const MIN_VM_DISK_GB: u32 = 8;
 
+const VM_CREATION_SAFETY_GUARD: &str = r#"
+# A stale VM registry or missing settings association MUST block creation.
+# Never interpret a failed VM enumeration as an absent VM.
+$cimRegistered = @(Get-CimInstance -Namespace 'root\virtualization\v2' -ClassName Msvm_ComputerSystem -ErrorAction Stop |
+    Where-Object { $_.Caption -eq 'Virtual Machine' -and $_.ElementName -eq $name })
+if ($cimRegistered.Count -gt 0) {
+    throw "VM '$name' is registered. Refusing to overwrite or remove an existing VM."
+}
+$inventory = @(Get-VM -ErrorAction Stop)
+if (@($inventory | Where-Object { $_.Name -eq $name }).Count -gt 0) {
+    throw "VM '$name' already exists. Refusing to overwrite or remove it."
+}
+if (Test-Path -LiteralPath $disk -PathType Leaf) {
+    throw "The VM disk '$disk' already exists. Refusing to overwrite it."
+}
+foreach ($artifact in @((Join-Path $root 'seed.iso'), (Join-Path $root 'seed.vhdx'))) {
+    if (Test-Path -LiteralPath $artifact -PathType Leaf) {
+        throw "Cloud-init artifact '$artifact' already exists; refusing to overwrite it."
+    }
+}
+if (Test-Path -LiteralPath (Join-Path $root 'seed') -PathType Container) {
+    throw "Cloud-init seed directory already exists under '$root'; refusing to reuse it."
+}
+"#;
+
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -701,7 +726,22 @@ try {{
         Ok(())
     }
 
+    fn ensure_vm_creation_is_safe(&self) -> Result<(), HyperVError> {
+        let disk =
+            PathBuf::from(&self.config.vm_root).join(format!("{}.vhdx", self.config.vm_name));
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'\n$name = '{}'\n$disk = '{}'\n$root = '{}'\n{}",
+            ps_quote(&self.config.vm_name),
+            ps_quote(&disk.to_string_lossy()),
+            ps_quote(&self.config.vm_root),
+            VM_CREATION_SAFETY_GUARD
+        );
+        self.ps(&script, true, Some(60))?;
+        Ok(())
+    }
+
     pub fn create_vm(&self, iso: &str) -> Result<(), HyperVError> {
+        self.ensure_vm_creation_is_safe()?;
         let root = PathBuf::from(&self.config.vm_root);
         std::fs::create_dir_all(&root)?;
         let disk = root.join(format!("{}.vhdx", self.config.vm_name));
@@ -719,7 +759,7 @@ $availableMb = $freeMb - 1024
 $targetMb = if ($availableMb -lt $configuredMb) {{ $availableMb }} else {{ $configuredMb }}
 if ($targetMb -lt 1024) {{ $targetMb = 1024 }}
 $targetMb = [int]([math]::Floor($targetMb / 2) * 2)
-if (Get-VM -Name $name -ErrorAction SilentlyContinue) {{ throw "VM '$name' already exists" }}
+{vm_safety_guard}
 if (!(Test-Path $root)) {{ New-Item -ItemType Directory -Force -Path $root | Out-Null }}
 if (!(Test-Path $disk)) {{ New-VHD -Path $disk -Dynamic -SizeBytes {disk_gb}GB | Out-Null }}
 New-VM -Name $name -Generation 2 -MemoryStartupBytes ($targetMb * 1MB) -VHDPath $disk -SwitchName $switchName -Path $root | Out-Null
@@ -738,6 +778,7 @@ try {{ Set-VMFirmware -VMName $name -EnableSecureBoot On -SecureBootTemplate 'Mi
             disk_gb = self.config.vm_disk_gb.max(MIN_VM_DISK_GB),
             memory_mb = self.config.vm_memory_mb.max(1024),
             cpus = self.config.vm_cpu_count.max(1),
+            vm_safety_guard = VM_CREATION_SAFETY_GUARD,
         );
         self.ps(&script, true, Some(180))?;
         Ok(())
@@ -757,6 +798,7 @@ try {{ Set-VMFirmware -VMName $name -EnableSecureBoot On -SecureBootTemplate 'Mi
                 image.display()
             )));
         }
+        self.ensure_vm_creation_is_safe()?;
         let public_key = self.ensure_ssh_key()?;
         let mut cfg = self.config.clone();
         cfg.ssh_public_key = public_key.clone();
@@ -787,9 +829,9 @@ $availableMb = $freeMb - 1024
 $targetMb = if ($availableMb -lt $configuredMb) {{ $availableMb }} else {{ $configuredMb }}
 if ($targetMb -lt 1024) {{ $targetMb = 1024 }}
 $targetMb = [int]([math]::Floor($targetMb / 2) * 2)
-if (Get-VM -Name $name -ErrorAction SilentlyContinue) {{ throw "VM '$name' already exists. Stop/remove it or choose another --vm-name." }}
+{vm_safety_guard}
 if (!(Test-Path $root)) {{ New-Item -ItemType Directory -Force -Path $root | Out-Null }}
-Copy-Item -Force $src $disk
+[IO.File]::Copy($src, $disk, $false)
 attrib -S -C $disk 2>$null
 try {{ Resize-VHD -Path $disk -SizeBytes {disk_gb}GB }} catch {{ Write-Warning $_ }}
 New-VM -Name $name -Generation 2 -MemoryStartupBytes ($targetMb * 1MB) -VHDPath $disk -SwitchName $switchName -Path $root | Out-Null
@@ -812,6 +854,7 @@ if (-not {no_start}) {{ Start-VM -Name $name | Out-Null }}
             disk_gb = self.config.vm_disk_gb.max(MIN_VM_DISK_GB),
             memory_mb = self.config.vm_memory_mb.max(1024),
             cpus = self.config.vm_cpu_count.max(1),
+            vm_safety_guard = VM_CREATION_SAFETY_GUARD,
             no_start = if no_start { "$true" } else { "$false" },
         );
         self.ps(&script, true, Some(240))?;
@@ -846,6 +889,7 @@ if (-not {no_start}) {{ Start-VM -Name $name | Out-Null }}
         sha512: Option<&str>,
         timeout: u32,
     ) -> Result<(), HyperVError> {
+        self.ensure_vm_creation_is_safe()?;
         let root = PathBuf::from(&self.config.vm_root);
         std::fs::create_dir_all(root.join("images"))?;
         let mut image_path = if image_vhdx.trim().is_empty() {
@@ -1111,7 +1155,7 @@ if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {{
             r#"$ErrorActionPreference = 'Stop'
 $src = '{src}'
 $out = '{out}'
-if (Test-Path $out) {{ Remove-Item -Force $out }}
+if (Test-Path -LiteralPath $out -PathType Leaf) {{ throw "Converted image already exists at $out. Refusing to overwrite it." }}
 compact.exe /U $src | Out-Null
 fsutil sparse setflag $src 0 2>$null | Out-Null
 attrib -S -C $src 2>$null
@@ -1146,7 +1190,7 @@ Resize-VHD -Path $out -SizeBytes {disk_gb}GB
             r#"$ErrorActionPreference = 'Stop'
 $src = '{src}'
 $out = '{out}'
-if (Test-Path $out) {{ Remove-Item -Force $out }}
+if (Test-Path -LiteralPath $out -PathType Leaf) {{ throw "Converted image already exists at $out. Refusing to overwrite it." }}
 $qemu = Get-Command qemu-img.exe -ErrorAction SilentlyContinue
 if (-not $qemu) {{ $qemu = Get-Command qemu-img -ErrorAction SilentlyContinue }}
 $qemuPath = if ($qemu) {{ $qemu.Source }} else {{ $null }}
@@ -1202,7 +1246,7 @@ Resize-VHD -Path $out -SizeBytes {disk_gb}GB
             r#"$ErrorActionPreference = 'Stop'
 $seed = '{seed}'
 $vhd = '{vhd}'
-if (Test-Path $vhd) {{ Remove-Item -Force $vhd }}
+if (Test-Path -LiteralPath $vhd -PathType Leaf) {{ throw "Seed VHDX already exists at $vhd; refusing to overwrite it." }}
 New-VHD -Path $vhd -SizeBytes 64MB -Dynamic | Out-Null
 $mounted = Mount-VHD -Path $vhd -Passthru
 try {{
@@ -3776,7 +3820,7 @@ const ISO_BUILD_SEED_PS: &str = r##"
 $ErrorActionPreference = 'Stop'
 $seed = '@@SEED@@'
 $iso = '@@ISO@@'
-if (Test-Path $iso) { Remove-Item -Force $iso }
+if (Test-Path -LiteralPath $iso -PathType Leaf) { throw "Seed ISO already exists; refusing to overwrite it." }
 $oscdimg = Get-Command oscdimg.exe -ErrorAction SilentlyContinue
 $geniso = Get-Command genisoimage.exe -ErrorAction SilentlyContinue
 if ($oscdimg) {
@@ -3826,6 +3870,32 @@ fn unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vm_creation_requires_healthy_inventory_and_refuses_existing_disks() {
+        let guard = VM_CREATION_SAFETY_GUARD;
+        assert!(guard.contains("Get-CimInstance"));
+        assert!(guard.contains("Msvm_ComputerSystem"));
+        assert!(guard.contains("Get-VM -ErrorAction Stop"));
+        assert!(guard.contains("Test-Path -LiteralPath $disk"));
+        assert!(guard.contains("throw"));
+        assert!(!guard.contains("Remove-VM"));
+        assert!(!guard.contains("SilentlyContinue"));
+
+        let source = include_str!("lib.rs");
+        let placeholder = ["{", "vm_safety_guard", "}"].concat();
+        assert_eq!(source.matches(&placeholder).count(), 2);
+        let preflight = ["self.ensure_vm_creation_is_safe()", "?;"].concat();
+        assert_eq!(source.matches(&preflight).count(), 3);
+        assert!(guard.contains("seed.iso"));
+        assert!(guard.contains("seed.vhdx"));
+        let dangerous_converted_delete = ["Remove-Item -Force", " $out"].concat();
+        let dangerous_seed_delete = ["Remove-Item -Force", " $vhd"].concat();
+        let dangerous_vm_copy = ["Copy-Item -Force", " $src $disk"].concat();
+        assert!(!source.contains(&dangerous_converted_delete));
+        assert!(!source.contains(&dangerous_seed_delete));
+        assert!(!source.contains(&dangerous_vm_copy));
+    }
 
     #[test]
     fn test_container_name() {

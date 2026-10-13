@@ -13,10 +13,14 @@ $required = @(
   '.github\workflows\release-windows.yml',
   '.gitignore',
   'LICENSE',
+  'LOCAL_GO_README.md',
+  'examples\smoke\docker-compose.yml',
   'runtime\windows-runtime-lock.json',
   'desktop\stackdeck\src-tauri\tauri.conf.json',
   'scripts\windows\09-Build-Signed-Release.ps1',
   'scripts\windows\10-Verify-Installer-Payloads.ps1',
+  'scripts\windows\04-Smoke-Test.ps1',
+  'scripts\windows\08-Initialize-Installed-Runtime.ps1',
   'scripts\windows\11-Verify-Installed-Client.ps1',
   'scripts\windows\15-Build-Local-Go-Package.ps1',
   'scripts\windows\16-Ensure-Prebuilt-Runtime-Prereqs.ps1',
@@ -93,6 +97,35 @@ if ($hypervText -notmatch 'DataProtectionScope\]::LocalMachine') {
   throw 'SMB DPAPI credential storage must use LocalMachine scope for the machine config root.'
 }
 
+$initScript = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\windows\08-Initialize-Installed-Runtime.ps1') -Raw
+if ($initScript -match '(?m)^\s*(?:Stop-VM|Remove-VM)\b') {
+  throw 'Installed runtime initialization must never silently stop or remove an existing VM.'
+}
+if ($initScript -notmatch 'Get-VM -ErrorAction Stop' -or
+    $initScript -notmatch 'Msvm_ComputerSystem' -or
+    $initScript -notmatch 'Refusing automated removal') {
+  throw 'Installed runtime initialization requires fail-closed Hyper-V registration guards.'
+}
+if ($hypervText -notmatch 'VM_CREATION_SAFETY_GUARD' -or
+    $hypervText -notmatch 'ensure_vm_creation_is_safe') {
+  throw 'Hyper-V ISO/cloud VM paths must retain independent fail-closed registry and disk safeguards.'
+}
+if ($hypervText -match 'Remove-Item -Force \$out' -or
+    $hypervText -match 'Remove-Item -Force \$vhd' -or
+    $hypervText -match 'Remove-Item -Force \$iso' -or
+    $hypervText -match 'Copy-Item -Force \$src \$disk') {
+  throw 'VM disk conversion and seed creation must never silently overwrite an existing file.'
+}
+if ($hypervText -notmatch 'self\.ensure_vm_creation_is_safe\(\)\?;') {
+  throw 'VM initialization must enforce read-only Hyper-V checks before image downloads.'
+}
+$inventoryMarker = '$inventory = @(Get-VM -ErrorAction Stop)'
+$configMarker = '$env:STACKDECK_CONFIG_DIR = Initialize-StackDeckMachineConfigRoot'
+$inventoryPosition = $initScript.IndexOf($inventoryMarker)
+$configPosition = $initScript.IndexOf($configMarker)
+if ($inventoryPosition -lt 0 -or $configPosition -le $inventoryPosition) {
+  throw 'Installed runtime initialization must validate Hyper-V inventory before modifying machine config.'
+}
 $forbidden = @(
   'desktop\stackdeck\src-tauri\bin\*.exe',
   '**\.stackdeck\state.db'
