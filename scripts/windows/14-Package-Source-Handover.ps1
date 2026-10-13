@@ -58,7 +58,9 @@ foreach ($mustHave in @(
     'scripts/windows/01-Build-Release.ps1',
     'scripts/windows/09-Build-Signed-Release.ps1',
     'scripts/windows/13-Verify-Source-Release.ps1',
-    'scripts/windows/14-Package-Source-Handover.ps1'
+    'scripts/windows/14-Package-Source-Handover.ps1',
+    'scripts/windows/17-Elevated-Release-Preflight.ps1',
+    'docs/WINDOWS_RELEASE_QUALIFICATION_2026-10-13.md'
   )) {
   if ($relativeFiles -notcontains $mustHave) {
     throw "Git source manifest does not contain required release path: $mustHave"

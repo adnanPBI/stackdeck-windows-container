@@ -61,7 +61,8 @@ if (-not $SevenZip) {
       "$env:ProgramFiles\7-Zip\7z.exe",
       "${env:ProgramFiles(x86)}\7-Zip\7z.exe",
       "$commonAppData\chocolatey\tools\7z.exe",
-      "$env:ChocolateyInstall\tools\7z.exe"
+      "$env:ChocolateyInstall\tools\7z.exe",
+      "$env:LOCALAPPDATA\StackDeck\release-tools\7zip\portable\7z.exe"
     )) {
       if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
         $SevenZip = $candidate

@@ -18,6 +18,25 @@ if ([string]::IsNullOrWhiteSpace($CertificateThumbprint) -or
   throw "A 40-character Authenticode certificate thumbprint is required. Pass -CertificateThumbprint or set STACKDECK_SIGNING_THUMBPRINT."
 }
 
+$cert = @(Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue |
+  Where-Object { $_.Thumbprint -ieq $CertificateThumbprint } | Select-Object -First 1)
+if ($cert.Count -ne 1 -or -not $cert[0].HasPrivateKey) {
+  throw "Release signing requires the authorized code-signing certificate with its private key in CurrentUser\My."
+}
+if ($cert[0].Subject -eq $cert[0].Issuer) {
+  throw "Self-signed development certificates are forbidden for publishable StackDeck releases."
+}
+if ($cert[0].NotAfter -le [DateTime]::UtcNow -or $cert[0].NotBefore -gt [DateTime]::UtcNow) {
+  throw "Release code-signing certificate is expired or not yet valid."
+}
+$codeSigningEku = @($cert[0].EnhancedKeyUsageList | ForEach-Object { [string]$_.ObjectId })
+if ($codeSigningEku -notcontains "1.3.6.1.5.5.7.3.3") {
+  throw "Release certificate is missing the Code Signing extended key usage."
+}
+$chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
+if (-not $chain.Build($cert[0])) {
+  throw "Code-signing chain could not be validated. The signed release additionally requires clean-runner trust checks."
+}
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).ProviderPath
 $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $git) { throw 'Signed releases require Git source provenance.' }

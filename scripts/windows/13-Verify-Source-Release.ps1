@@ -19,7 +19,9 @@ $required = @(
   'scripts\windows\10-Verify-Installer-Payloads.ps1',
   'scripts\windows\11-Verify-Installed-Client.ps1',
   'scripts\windows\15-Build-Local-Go-Package.ps1',
-  'scripts\windows\16-Ensure-Prebuilt-Runtime-Prereqs.ps1'
+  'scripts\windows\16-Ensure-Prebuilt-Runtime-Prereqs.ps1',
+  'scripts\windows\17-Elevated-Release-Preflight.ps1',
+  'docs\WINDOWS_RELEASE_QUALIFICATION_2026-10-13.md'
 )
 foreach ($relative in $required) {
   $path = Join-Path $repoRoot $relative
