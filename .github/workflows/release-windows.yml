@@ -109,33 +109,47 @@ jobs:
             choco install 7zip -y --no-progress
           }
 
-      - name: Import Authenticode certificate
+      - name: Prepare DigiCert KeyLocker client authentication
+        shell: powershell
+        env:
+          SM_HOST: ${{ vars.SM_HOST }}
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_CLIENT_CERT_FILE_B64: ${{ secrets.SM_CLIENT_CERT_FILE_B64 }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
+          EXPECTED_THUMBPRINT: ${{ secrets.WINDOWS_SIGNING_CERT_THUMBPRINT }}
+          KEYPAIR_ALIAS: ${{ vars.WINDOWS_SIGNING_KEYPAIR_ALIAS }}
+        run: |
+          foreach ($key in @('SM_HOST','SM_API_KEY','SM_CLIENT_CERT_FILE_B64','SM_CLIENT_CERT_PASSWORD','EXPECTED_THUMBPRINT','KEYPAIR_ALIAS')) {
+            if (-not [Environment]::GetEnvironmentVariable($key)) { throw "Required KeyLocker setting $key is unavailable." }
+          }
+          $credentialFile = Join-Path $env:RUNNER_TEMP 'digicert-client-auth.p12'
+          [IO.File]::WriteAllBytes($credentialFile,[Convert]::FromBase64String($env:SM_CLIENT_CERT_FILE_B64))
+          "SM_CLIENT_CERT_FILE=$credentialFile" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Install official DigiCert KeyLocker tools
+        uses: digicert/code-signing-software-trust-action@v1
+        env:
+          SM_HOST: ${{ vars.SM_HOST }}
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_CLIENT_CERT_FILE: ${{ env.SM_CLIENT_CERT_FILE }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
+      - name: Validate public-trust certificate and DigiCert KSP
         id: cert
         shell: powershell
         env:
-          CERT_PFX_B64: ${{ secrets.WINDOWS_SIGNING_CERT_PFX_B64 }}
-          CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+          SM_HOST: ${{ vars.SM_HOST }}
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
           EXPECTED_THUMBPRINT: ${{ secrets.WINDOWS_SIGNING_CERT_THUMBPRINT }}
+          KEYPAIR_ALIAS: ${{ vars.WINDOWS_SIGNING_KEYPAIR_ALIAS }}
         run: |
-          if (-not $env:CERT_PFX_B64 -or -not $env:CERT_PASSWORD -or -not $env:EXPECTED_THUMBPRINT) {
-            throw 'Windows signing secrets are not configured.'
-          }
-          $pfx = Join-Path $env:RUNNER_TEMP 'stackdeck-signing.pfx'
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_PFX_B64))
-          $secure = ConvertTo-SecureString $env:CERT_PASSWORD -AsPlainText -Force
-          $imported = @(Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure -Exportable:$false)
-          Remove-Item $pfx -Force
-          $cert = @($imported | Where-Object { $_.Thumbprint -ieq $env:EXPECTED_THUMBPRINT }) | Select-Object -First 1
-          if (-not $cert) { throw 'Imported certificate thumbprint does not match WINDOWS_SIGNING_CERT_THUMBPRINT.' }
-          if ($cert.Subject -eq $cert.Issuer) { throw 'Self-signed developer certificates cannot publish a trusted Windows client release.' }
-          if ($cert.NotBefore -gt (Get-Date) -or $cert.NotAfter -le (Get-Date)) { throw 'Code-signing certificate is outside its validity period.' }
-          if (-not @($cert.EnhancedKeyUsageList | Where-Object { $_.FriendlyName -eq 'Code Signing' }).Count) { throw 'Certificate must permit Code Signing.' }
-          "thumbprint=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
+          .\scripts\windows\19-Prepare-DigiCert-KeyLocker.ps1 -CertificateThumbprint $env:EXPECTED_THUMBPRINT -KeypairAlias $env:KEYPAIR_ALIAS
       - name: Build, sign, bundle, and verify release
         shell: powershell
         env:
           STACKDECK_SIGNING_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+          SM_HOST: ${{ vars.SM_HOST }}
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
         run: |
           $params = @{
             CertificateThumbprint = $env:STACKDECK_SIGNING_THUMBPRINT
@@ -183,3 +197,11 @@ jobs:
           if ($artifacts.Count -ne 7) { throw "Expected 7 verified assets, found $($artifacts.Count)." }
           & gh release create $env:GITHUB_REF_NAME @artifacts --verify-tag --generate-notes --title "StackDeck $env:GITHUB_REF_NAME"
           if ($LASTEXITCODE -ne 0) { throw 'GitHub release publication failed.' }
+
+      - name: Remove temporary KeyLocker authentication credential
+        if: always()
+        shell: powershell
+        run: |
+          if ($env:SM_CLIENT_CERT_FILE -and (Test-Path -LiteralPath $env:SM_CLIENT_CERT_FILE)) {
+            Remove-Item -LiteralPath $env:SM_CLIENT_CERT_FILE -Force
+          }
