@@ -35,6 +35,22 @@ if (Test-Path -LiteralPath (Join-Path $root 'seed') -PathType Container) {
 }
 "#;
 
+/// Recheck VM registry and target VM disk *after* this same initialization
+/// generated its cloud-init seed. Do not reject our just-created seed media.
+const VM_FINAL_CREATION_SAFETY_GUARD: &str = r#"
+$cimRegistered = @(Get-CimInstance -Namespace 'root\virtualization\v2' -ClassName Msvm_ComputerSystem -ErrorAction Stop |
+    Where-Object { $_.Caption -eq 'Virtual Machine' -and $_.ElementName -eq $name })
+if ($cimRegistered.Count -gt 0) {
+    throw "VM '$name' is registered. Refusing to overwrite or remove an existing VM."
+}
+$inventory = @(Get-VM -ErrorAction Stop)
+if (@($inventory | Where-Object { $_.Name -eq $name }).Count -gt 0) {
+    throw "VM '$name' already exists. Refusing to overwrite or remove it."
+}
+if (Test-Path -LiteralPath $disk -PathType Leaf) {
+    throw "The VM disk '$disk' already exists. Refusing to overwrite it."
+}
+"#;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -854,7 +870,7 @@ if (-not {no_start}) {{ Start-VM -Name $name | Out-Null }}
             disk_gb = self.config.vm_disk_gb.max(MIN_VM_DISK_GB),
             memory_mb = self.config.vm_memory_mb.max(1024),
             cpus = self.config.vm_cpu_count.max(1),
-            vm_safety_guard = VM_CREATION_SAFETY_GUARD,
+            vm_safety_guard = VM_FINAL_CREATION_SAFETY_GUARD,
             no_start = if no_start { "$true" } else { "$false" },
         );
         self.ps(&script, true, Some(240))?;
@@ -3889,6 +3905,13 @@ mod tests {
         assert_eq!(source.matches(&preflight).count(), 3);
         assert!(guard.contains("seed.iso"));
         assert!(guard.contains("seed.vhdx"));
+        let final_guard = VM_FINAL_CREATION_SAFETY_GUARD;
+        assert!(final_guard.contains("Get-CimInstance"));
+        assert!(final_guard.contains("Get-VM -ErrorAction Stop"));
+        assert!(final_guard.contains("Test-Path -LiteralPath $disk"));
+        assert!(!final_guard.contains("seed.iso"));
+        assert!(!final_guard.contains("seed.vhdx"));
+        assert!(!final_guard.contains("Remove-VM"));
         let dangerous_converted_delete = ["Remove-Item -Force", " $out"].concat();
         let dangerous_seed_delete = ["Remove-Item -Force", " $vhd"].concat();
         let dangerous_vm_copy = ["Copy-Item -Force", " $src $disk"].concat();
