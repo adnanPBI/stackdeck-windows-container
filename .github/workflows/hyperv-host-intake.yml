@@ -1,0 +1,64 @@
+name: Dedicated Windows Hyper-V Host Intake
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_disposable:
+        description: 'I confirm this is a dedicated disposable Windows 11 x64 Hyper-V workstation with no valuable VMs or StackDeck data'
+        required: true
+        type: boolean
+        default: false
+      expected_commit:
+        description: 'Exact 40-character main commit SHA authorized for qualification'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stackdeck-hyperv-host-intake
+  cancel-in-progress: false
+
+jobs:
+  read-only-intake:
+    if: ${{ inputs.confirm_disposable == true && github.ref == 'refs/heads/main' }}
+    # This label is placed ONLY on an explicitly approved clean dedicated
+    # Windows 11 machine. Never register a shared/personal computer here.
+    runs-on: [self-hosted, Windows, X64, stackdeck-hyperv-qa]
+    environment: windows-qualification
+    timeout-minutes: 20
+    steps:
+      - name: Verify immutable source SHA before any host inspection
+        shell: powershell
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          if ($env:EXPECTED_COMMIT -notmatch '^[a-fA-F0-9]{40}$') {
+            throw 'A full 40-character reviewed source commit is required.'
+          }
+          if ($env:EXPECTED_COMMIT -ine '${{ github.sha }}') {
+            throw 'The selected main revision is not the approved source commit.'
+          }
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Inspect dedicated Hyper-V host (read-only)
+        shell: powershell
+        run: |
+          .\scripts\windows\18-Host-Qualification-Intake.ps1 -RequireDisposableHost -Output (Join-Path $env:RUNNER_TEMP 'stackdeck-hyperv-intake.json')
+      - name: Preserve machine-readable intake evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stackdeck-hyperv-intake-${{ github.sha }}
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/stackdeck-hyperv-intake.json
+      - name: Prohibit production signing and VM mutations in intake job
+        shell: powershell
+        if: success()
+        run: |
+          Write-Host 'READ-ONLY host intake passed.'
+          Write-Host 'This is NOT production runtime qualification.'
+          Write-Host 'Run provisioning, OCI, Compose, restart and cleanup qualification separately with operator supervision.'
