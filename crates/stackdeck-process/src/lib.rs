@@ -892,21 +892,39 @@ fn process_identity_with_retry(pid: u32) -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn process_identity(pid: u32) -> Option<String> {
-    let script = format!(
-        "$p=Get-CimInstance Win32_Process -Filter \"ProcessId = {}\"; if ($p) {{ \"win:$($p.ProcessId)|$($p.CreationDate)|$($p.ExecutablePath)|$($p.CommandLine)\" }}",
-        pid
-    );
-    let output = create_command("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    // Query the kernel directly. Spawning PowerShell/CIM can stall indefinitely
+    // when WMI or Hyper-V providers are busy and freeze PID-reuse guards.
+    // The creation FILETIME prevents a recycled PID from being mistaken for
+    // the process we originally started.
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
         return None;
     }
-    let identity = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!identity.is_empty()).then_some(identity)
+    let identity = (|| {
+        let mut creation: FILETIME = unsafe { std::mem::zeroed() };
+        let mut exit: FILETIME = unsafe { std::mem::zeroed() };
+        let mut kernel: FILETIME = unsafe { std::mem::zeroed() };
+        let mut user: FILETIME = unsafe { std::mem::zeroed() };
+        if unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } == 0
+        {
+            return None;
+        }
+        let mut image = vec![0_u16; 32768];
+        let mut length = image.len() as u32;
+        if unsafe { QueryFullProcessImageNameW(handle, 0, image.as_mut_ptr(), &mut length) } == 0 {
+            return None;
+        }
+        let started = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+        let path = String::from_utf16_lossy(&image[..length as usize]).to_lowercase();
+        Some(format!("win2:{pid}|{started}|{path}"))
+    })();
+    unsafe { CloseHandle(handle) };
+    identity
 }
 
 #[cfg(not(target_os = "windows"))]
