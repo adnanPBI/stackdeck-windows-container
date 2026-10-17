@@ -982,8 +982,7 @@ sudo rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/d
 printf 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/%s/ bookworm main\n' "$SNAPSHOT" | sudo tee /etc/apt/sources.list >/dev/null
 sudo apt-get -o Acquire::Check-Valid-Until=false update -y
 sudo apt-get -o Acquire::Check-Valid-Until=false install -y ca-certificates curl gnupg containerd cifs-utils cloud-guest-utils containernetworking-plugins uidmap iptables
-sudo growpart /dev/sda 1 || true
-sudo resize2fs /dev/sda1 || true
+# Cloud-init expands the filesystem mounted at /; device names vary on Hyper-V.
 sudo systemctl enable --now containerd
 if ! command -v nerdctl >/dev/null 2>&1 || ! command -v buildctl >/dev/null 2>&1 || ! command -v buildkitd >/dev/null 2>&1; then
   ARCH=$(uname -m)
@@ -3737,6 +3736,10 @@ users:
       - {key}
 ssh_pwauth: false
 disable_root: true
+growpart:
+  mode: auto
+  devices: ['/']
+resize_rootfs: true
 package_update: true
 packages:
   - openssh-server
@@ -3752,8 +3755,6 @@ packages:
 runcmd:
   - [ sh, -c, "systemctl enable --now ssh || systemctl enable --now sshd" ]
   - [ systemctl, enable, --now, containerd ]
-  - [ growpart, /dev/sda, '1' ]
-  - [ resize2fs, /dev/sda1 ]
 final_message: "stackdeck cloud-init complete"
 "#,
         user = user,
@@ -4058,6 +4059,15 @@ mod tests {
         assert_eq!(parsed.ssh_port, 22);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_cloud_init_grows_root_without_assuming_sda() {
+        let user_data = cloud_init_user_data("stackdeck", "ssh-ed25519 AAAATEST stackdeck-test");
+        assert!(user_data.contains("growpart:\n  mode: auto\n  devices: ['/']"));
+        assert!(user_data.contains("resize_rootfs: true"));
+        assert!(!user_data.contains("/dev/sda"));
+        assert!(user_data.contains("ssh_pwauth: false"));
     }
 
     #[test]
