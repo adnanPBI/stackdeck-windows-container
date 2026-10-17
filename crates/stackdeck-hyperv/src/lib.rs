@@ -1018,7 +1018,7 @@ UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now buildkit
 sudo systemctl is-active --quiet buildkit
-buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null
+sudo buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null
 sudo nerdctl --namespace stackdeck version >/dev/null
 "#,
             snapshot = runtime.debian_snapshot_timestamp,
@@ -2885,7 +2885,7 @@ if ($dnsIp) {{
         }
         let nerdctl = nerdctl_command(&self.config, &["ps", "-a"]);
         let command = format!(
-            "systemctl is-active --quiet containerd && command -v nerdctl >/dev/null 2>&1 && {nerdctl} >/dev/null && systemctl is-active --quiet buildkit && buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1"
+            "systemctl is-active --quiet containerd && command -v nerdctl >/dev/null 2>&1 && {nerdctl} >/dev/null && systemctl is-active --quiet buildkit && sudo buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1"
         );
         let mut args = self.ssh_base();
         args.push(command);
@@ -2924,7 +2924,7 @@ if ($dnsIp) {{
 
             let buildkit = self
                 .ssh(
-                    "systemctl is-active buildkit 2>/dev/null && buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1 && echo ready || echo unavailable",
+                    "systemctl is-active buildkit 2>/dev/null && sudo buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1 && echo ready || echo unavailable",
                     false,
                 )
                 .unwrap_or_default();
@@ -4059,6 +4059,18 @@ mod tests {
         assert_eq!(parsed.ssh_port, 22);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_buildkit_root_owned_socket_checks_use_sudo() {
+        // BuildKit's containerd-worker socket is root-owned on Debian 12.
+        // Keep bootstrap, live health, and diagnostics consistent.
+        let source = include_str!("lib.rs");
+        let command = concat!(
+            "sudo",
+            " buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers"
+        );
+        assert_eq!(source.matches(command).count(), 3);
     }
 
     #[test]
