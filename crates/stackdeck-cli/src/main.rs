@@ -1070,6 +1070,23 @@ fn removable_hyperv_compose_network_names(
     removable
 }
 
+fn pending_project_container_cleanup(
+    names: &[String],
+    states: &HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| {
+            states
+                .get(name.as_str())
+                .and_then(|state| state.get("exists"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
 fn stack_service_to_hyperv(
     stack: &stackdeck_types::StackConfig,
     svc: &stackdeck_types::ServiceConfig,
@@ -2506,12 +2523,64 @@ fn cmd_compose_down(
     } else {
         Vec::new()
     };
+    let project_containers: Vec<String> = if !owned_networks.is_empty() {
+        targets
+            .iter()
+            .filter_map(|name| {
+                stack
+                    .services
+                    .get(name)
+                    .filter(|service| effective_backend(backend, &service.backend) == "hyperv")
+            })
+            .map(|service| stackdeck_hyperv::container_name(&stack.project, &service.name))
+            .collect()
+    } else {
+        Vec::new()
+    };
     run_stack_down(stack, backend, &targets, volumes)?;
     if !owned_networks.is_empty() {
         let manager =
             stackdeck_hyperv::HyperVManager::new(stackdeck_hyperv::HyperVManager::load_config()?);
+        // nerdctl rm -f can report success before its background cleanup
+        // detaches endpoints. Check only this project's container names.
+        let mut remaining = project_containers.clone();
+        for attempt in 0..30 {
+            let refs: Vec<&str> = remaining.iter().map(String::as_str).collect();
+            let inspected = manager.inspect_containers(&refs)?;
+            remaining = pending_project_container_cleanup(&remaining, &inspected);
+            if remaining.is_empty() {
+                break;
+            }
+            if attempt < 29 {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+        if !remaining.is_empty() {
+            anyhow::bail!(
+                "Container cleanup has not finished; refusing network removal: {}",
+                remaining.join(", ")
+            );
+        }
         let names: Vec<&str> = owned_networks.iter().map(String::as_str).collect();
-        manager.network_remove(&names)?;
+        let mut removed = false;
+        let mut last_error = String::new();
+        for attempt in 0..8 {
+            match manager.network_remove(&names) {
+                Ok(_) => {
+                    removed = true;
+                    break;
+                }
+                Err(err) => {
+                    last_error = err.to_string();
+                    if attempt < 7 {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                }
+            }
+        }
+        if !removed {
+            anyhow::bail!("Owned network cleanup did not finish: {}", last_error);
+        }
         println!("Removed project networks: {}", owned_networks.join(", "));
     }
     Ok(())
@@ -2963,6 +3032,20 @@ services:
         let stack = load_compose_stack(&file, "hyperv", &active_profiles).unwrap();
 
         assert!(stack.services.contains_key("debug"));
+    }
+
+    #[test]
+    fn compose_down_waits_for_pending_container_teardown_before_network_removal() {
+        let names = vec!["stackdeck-demo-web".to_string()];
+        let mut states = HashMap::new();
+        assert_eq!(pending_project_container_cleanup(&names, &states), names);
+        states.insert(
+            names[0].clone(),
+            serde_json::json!({"exists": true, "running": false}),
+        );
+        assert_eq!(pending_project_container_cleanup(&names, &states), names);
+        states.insert(names[0].clone(), serde_json::json!({"exists": false}));
+        assert!(pending_project_container_cleanup(&names, &states).is_empty());
     }
 
     #[test]
