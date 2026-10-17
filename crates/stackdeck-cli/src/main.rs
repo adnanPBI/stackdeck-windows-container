@@ -1046,6 +1046,30 @@ fn removable_hyperv_volume_names(stack: &stackdeck_types::StackConfig) -> Vec<St
     volume_names
 }
 
+fn removable_hyperv_compose_network_names(
+    project: &stackdeck_types::ComposeProject,
+    stack: &stackdeck_types::StackConfig,
+    backend: &str,
+) -> Vec<String> {
+    // Only remove networks created and owned by this Compose project.
+    // External networks must survive `compose down`, including when they are empty.
+    let used: std::collections::HashSet<&str> = stack
+        .services
+        .values()
+        .filter(|svc| effective_backend(backend, &svc.backend) == "hyperv")
+        .flat_map(|svc| svc.networks.iter().map(String::as_str))
+        .collect();
+    let mut removable: Vec<String> = project
+        .networks
+        .values()
+        .filter(|network| !network.external && used.contains(network.name.as_str()))
+        .map(|network| network.name.clone())
+        .collect();
+    removable.sort();
+    removable.dedup();
+    removable
+}
+
 fn stack_service_to_hyperv(
     stack: &stackdeck_types::StackConfig,
     svc: &stackdeck_types::ServiceConfig,
@@ -2472,7 +2496,25 @@ fn cmd_compose_down(
     } else {
         services.to_vec()
     };
-    run_stack_down(stack, backend, &targets, volumes)
+    // Only full-project down may delete a network. Re-parse the Compose
+    // resources to preserve the explicit external ownership bit, which is
+    // deliberately not flattened into StackConfig's service network names.
+    let owned_networks = if services.is_empty() {
+        let project =
+            stackdeck_compose::load_compose_file(&PathBuf::from(file), None, profiles, None, None)?;
+        removable_hyperv_compose_network_names(&project, &stack, backend)
+    } else {
+        Vec::new()
+    };
+    run_stack_down(stack, backend, &targets, volumes)?;
+    if !owned_networks.is_empty() {
+        let manager =
+            stackdeck_hyperv::HyperVManager::new(stackdeck_hyperv::HyperVManager::load_config()?);
+        let names: Vec<&str> = owned_networks.iter().map(String::as_str).collect();
+        manager.network_remove(&names)?;
+        println!("Removed project networks: {}", owned_networks.join(", "));
+    }
+    Ok(())
 }
 
 fn cmd_compose_status(
@@ -2921,6 +2963,35 @@ services:
         let stack = load_compose_stack(&file, "hyperv", &active_profiles).unwrap();
 
         assert!(stack.services.contains_key("debug"));
+    }
+
+    #[test]
+    fn compose_down_removes_owned_networks_not_external_or_unused_networks() {
+        let file = write_compose(
+            "network-cleanup",
+            r#"
+name: demo
+services:
+  web:
+    image: nginx
+    networks:
+      - default
+      - shared
+networks:
+  shared:
+    external: true
+    name: corp_shared
+  unused:
+    name: demo_unused
+"#,
+        );
+        let project =
+            stackdeck_compose::load_compose_file(&PathBuf::from(&file), None, &[], None, None)
+                .unwrap();
+        let stack = load_compose_stack(&file, "hyperv", &[]).unwrap();
+        let managed = removable_hyperv_compose_network_names(&project, &stack, "hyperv");
+        assert_eq!(managed, vec!["demo_default"]);
+        assert!(removable_hyperv_compose_network_names(&project, &stack, "native").is_empty());
     }
 
     #[test]
