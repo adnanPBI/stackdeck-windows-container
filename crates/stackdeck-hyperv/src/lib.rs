@@ -35,6 +35,22 @@ if (Test-Path -LiteralPath (Join-Path $root 'seed') -PathType Container) {
 }
 "#;
 
+/// Recheck VM registry and target VM disk *after* this same initialization
+/// generated its cloud-init seed. Do not reject our just-created seed media.
+const VM_FINAL_CREATION_SAFETY_GUARD: &str = r#"
+$cimRegistered = @(Get-CimInstance -Namespace 'root\virtualization\v2' -ClassName Msvm_ComputerSystem -ErrorAction Stop |
+    Where-Object { $_.Caption -eq 'Virtual Machine' -and $_.ElementName -eq $name })
+if ($cimRegistered.Count -gt 0) {
+    throw "VM '$name' is registered. Refusing to overwrite or remove an existing VM."
+}
+$inventory = @(Get-VM -ErrorAction Stop)
+if (@($inventory | Where-Object { $_.Name -eq $name }).Count -gt 0) {
+    throw "VM '$name' already exists. Refusing to overwrite or remove it."
+}
+if (Test-Path -LiteralPath $disk -PathType Leaf) {
+    throw "The VM disk '$disk' already exists. Refusing to overwrite it."
+}
+"#;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -854,7 +870,7 @@ if (-not {no_start}) {{ Start-VM -Name $name | Out-Null }}
             disk_gb = self.config.vm_disk_gb.max(MIN_VM_DISK_GB),
             memory_mb = self.config.vm_memory_mb.max(1024),
             cpus = self.config.vm_cpu_count.max(1),
-            vm_safety_guard = VM_CREATION_SAFETY_GUARD,
+            vm_safety_guard = VM_FINAL_CREATION_SAFETY_GUARD,
             no_start = if no_start { "$true" } else { "$false" },
         );
         self.ps(&script, true, Some(240))?;
@@ -966,8 +982,7 @@ sudo rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/d
 printf 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/%s/ bookworm main\n' "$SNAPSHOT" | sudo tee /etc/apt/sources.list >/dev/null
 sudo apt-get -o Acquire::Check-Valid-Until=false update -y
 sudo apt-get -o Acquire::Check-Valid-Until=false install -y ca-certificates curl gnupg containerd cifs-utils cloud-guest-utils containernetworking-plugins uidmap iptables
-sudo growpart /dev/sda 1 || true
-sudo resize2fs /dev/sda1 || true
+# Cloud-init expands the filesystem mounted at /; device names vary on Hyper-V.
 sudo systemctl enable --now containerd
 if ! command -v nerdctl >/dev/null 2>&1 || ! command -v buildctl >/dev/null 2>&1 || ! command -v buildkitd >/dev/null 2>&1; then
   ARCH=$(uname -m)
@@ -1003,7 +1018,7 @@ UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now buildkit
 sudo systemctl is-active --quiet buildkit
-buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null
+sudo buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null
 sudo nerdctl --namespace stackdeck version >/dev/null
 "#,
             snapshot = runtime.debian_snapshot_timestamp,
@@ -1116,6 +1131,37 @@ if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {{
         let extract_dir = PathBuf::from(&self.config.vm_root)
             .join("images")
             .join(format!("{}.extracted", archive_stem(source)));
+        // Official Debian Azure xz media must contain only disk.raw. The
+        // member check prevents archives from injecting or replacing other
+        // files, and the extraction directory must never be overwritten.
+        let is_azure_xz = source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|name| name.to_ascii_lowercase().ends_with(".tar.xz"))
+            .unwrap_or(false);
+        if is_azure_xz {
+            let listed = self.run_cmd(
+                &[
+                    "tar".to_string(),
+                    "-tf".to_string(),
+                    source.to_string_lossy().to_string(),
+                ],
+                true,
+                Some(180),
+            )?;
+            let members: Vec<&str> = listed.lines().map(str::trim).collect();
+            if members != ["disk.raw"] {
+                return Err(HyperVError::Config(
+                    "Debian Azure archive must contain exactly one disk.raw member".into(),
+                ));
+            }
+        }
+        if extract_dir.exists() && std::fs::read_dir(&extract_dir)?.next().is_some() {
+            return Err(HyperVError::Config(format!(
+                "cloud archive extraction destination is not empty: {}",
+                extract_dir.display()
+            )));
+        }
         std::fs::create_dir_all(&extract_dir)?;
 
         self.run_cmd(
@@ -1132,7 +1178,7 @@ if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {{
 
         find_disk_image(&extract_dir).ok_or_else(|| {
             HyperVError::Config(format!(
-                "archive {} did not contain a .vhdx or .vhd image",
+                "archive {} did not contain a supported virtual disk image",
                 source.display()
             ))
         })
@@ -1200,12 +1246,21 @@ if (-not $qemuPath) {{
   }}
 }}
 if (-not $qemuPath) {{ throw 'qemu-img is required to convert qcow2/img cloud images to VHDX. Install QEMU/qemu-img, add it to PATH, or provide a pre-converted .vhdx with --image-vhdx.' }}
-& $qemuPath convert -O vhdx -o subformat=dynamic $src $out
+# Explicitly treat official Azure disk.raw as raw bytes; keep existing
+# format detection for qcow2, img and other supported source types.
+if ([IO.Path]::GetExtension($src) -ieq '.raw') {{
+  & $qemuPath convert -f raw -O vhdx -o subformat=dynamic $src $out
+}} else {{
+  & $qemuPath convert -O vhdx -o subformat=dynamic $src $out
+}}
 if ($LASTEXITCODE -ne 0) {{ throw "qemu-img convert failed with exit code $LASTEXITCODE" }}
 compact.exe /U $out | Out-Null
 fsutil sparse setflag $out 0 2>$null | Out-Null
 attrib -S -C $out 2>$null
-Resize-VHD -Path $out -SizeBytes {disk_gb}GB
+# Never shrink the publisher's 30-GiB Azure image to a smaller VM default.
+$currentSize = (Get-VHD -Path $out -ErrorAction Stop).Size
+$desiredSize = {disk_gb}GB
+if ($currentSize -lt $desiredSize) {{ Resize-VHD -Path $out -SizeBytes $desiredSize -ErrorAction Stop }}
 "#,
             src = ps_quote(&source.to_string_lossy()),
             out = ps_quote(&output.to_string_lossy()),
@@ -2024,8 +2079,6 @@ if ($dnsIp) {{
             service_hostname(&svc.name),
             "--network".to_string(),
             network,
-            "--network-alias".to_string(),
-            svc.name.clone(),
         ];
 
         let restart = if svc.restart == "always" || svc.restart == "unless-stopped" {
@@ -2870,7 +2923,7 @@ if ($dnsIp) {{
         }
         let nerdctl = nerdctl_command(&self.config, &["ps", "-a"]);
         let command = format!(
-            "systemctl is-active --quiet containerd && command -v nerdctl >/dev/null 2>&1 && {nerdctl} >/dev/null && systemctl is-active --quiet buildkit && buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1"
+            "systemctl is-active --quiet containerd && command -v nerdctl >/dev/null 2>&1 && {nerdctl} >/dev/null && systemctl is-active --quiet buildkit && sudo buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1"
         );
         let mut args = self.ssh_base();
         args.push(command);
@@ -2909,7 +2962,7 @@ if ($dnsIp) {{
 
             let buildkit = self
                 .ssh(
-                    "systemctl is-active buildkit 2>/dev/null && buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1 && echo ready || echo unavailable",
+                    "systemctl is-active buildkit 2>/dev/null && sudo buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1 && echo ready || echo unavailable",
                     false,
                 )
                 .unwrap_or_default();
@@ -3659,6 +3712,7 @@ fn is_tar_archive(path: &Path) -> bool {
     name.ends_with(".tar")
         || name.ends_with(".tar.gz")
         || name.ends_with(".tgz")
+        || name.ends_with(".tar.xz")
         || name.ends_with(".ova")
 }
 
@@ -3668,7 +3722,7 @@ fn archive_stem(path: &Path) -> String {
         .and_then(|v| v.to_str())
         .unwrap_or("cloud-image")
         .to_string();
-    for suffix in [".tar.gz", ".tgz", ".tar", ".ova"] {
+    for suffix in [".tar.gz", ".tar.xz", ".tgz", ".tar", ".ova"] {
         if name.to_ascii_lowercase().ends_with(suffix) {
             let keep = name.len() - suffix.len();
             name.truncate(keep);
@@ -3694,7 +3748,8 @@ fn find_disk_image(root: &Path) -> Option<PathBuf> {
                 vhd = Some(path);
             } else if (has_extension(&path, "vmdk")
                 || has_extension(&path, "qcow2")
-                || has_extension(&path, "img"))
+                || has_extension(&path, "img")
+                || has_extension(&path, "raw"))
                 && convertible.is_none()
             {
                 convertible = Some(path);
@@ -3721,6 +3776,10 @@ users:
       - {key}
 ssh_pwauth: false
 disable_root: true
+growpart:
+  mode: auto
+  devices: ['/']
+resize_rootfs: true
 package_update: true
 packages:
   - openssh-server
@@ -3736,8 +3795,6 @@ packages:
 runcmd:
   - [ sh, -c, "systemctl enable --now ssh || systemctl enable --now sshd" ]
   - [ systemctl, enable, --now, containerd ]
-  - [ growpart, /dev/sda, '1' ]
-  - [ resize2fs, /dev/sda1 ]
 final_message: "stackdeck cloud-init complete"
 "#,
         user = user,
@@ -3889,6 +3946,13 @@ mod tests {
         assert_eq!(source.matches(&preflight).count(), 3);
         assert!(guard.contains("seed.iso"));
         assert!(guard.contains("seed.vhdx"));
+        let final_guard = VM_FINAL_CREATION_SAFETY_GUARD;
+        assert!(final_guard.contains("Get-CimInstance"));
+        assert!(final_guard.contains("Get-VM -ErrorAction Stop"));
+        assert!(final_guard.contains("Test-Path -LiteralPath $disk"));
+        assert!(!final_guard.contains("seed.iso"));
+        assert!(!final_guard.contains("seed.vhdx"));
+        assert!(!final_guard.contains("Remove-VM"));
         let dangerous_converted_delete = ["Remove-Item -Force", " $out"].concat();
         let dangerous_seed_delete = ["Remove-Item -Force", " $vhd"].concat();
         let dangerous_vm_copy = ["Copy-Item -Force", " $src $disk"].concat();
@@ -4035,6 +4099,36 @@ mod tests {
         assert_eq!(parsed.ssh_port, 22);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_nerdctl_run_does_not_emit_docker_only_network_alias_flag() {
+        // nerdctl v2.3.5 rejects Docker's --network-alias at container run time.
+        // Service hostname and CNI network setup are tested separately on a guest.
+        let source = include_str!("lib.rs");
+        let unsupported_argument = ["\"", "--network-alias", "\".to_string()"].concat();
+        assert!(!source.contains(&unsupported_argument));
+    }
+
+    #[test]
+    fn test_buildkit_root_owned_socket_checks_use_sudo() {
+        // BuildKit's containerd-worker socket is root-owned on Debian 12.
+        // Keep bootstrap, live health, and diagnostics consistent.
+        let source = include_str!("lib.rs");
+        let command = concat!(
+            "sudo",
+            " buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers"
+        );
+        assert_eq!(source.matches(command).count(), 3);
+    }
+
+    #[test]
+    fn test_cloud_init_grows_root_without_assuming_sda() {
+        let user_data = cloud_init_user_data("stackdeck", "ssh-ed25519 AAAATEST stackdeck-test");
+        assert!(user_data.contains("growpart:\n  mode: auto\n  devices: ['/']"));
+        assert!(user_data.contains("resize_rootfs: true"));
+        assert!(!user_data.contains("/dev/sda"));
+        assert!(user_data.contains("ssh_pwauth: false"));
     }
 
     #[test]
@@ -4204,6 +4298,21 @@ mod tests {
         let ova = Path::new("jammy-server-cloudimg-amd64.ova");
         assert!(is_tar_archive(ova));
         assert_eq!(archive_stem(ova), "jammy-server-cloudimg-amd64");
+
+        // Exact official Debian Azure artifact: tar.xz wrapping disk.raw.
+        let debian = Path::new("debian-12-azure-amd64-20260806-2562.tar.xz");
+        assert!(is_tar_archive(debian));
+        assert_eq!(archive_stem(debian), "debian-12-azure-amd64-20260806-2562");
+    }
+
+    #[test]
+    fn test_debian_azure_archive_supports_only_validated_raw_member_and_growth_only() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("members != [\"disk.raw\"]"));
+        assert!(source.contains("if extract_dir.exists()"));
+        assert!(source.contains("has_extension(&path, \"raw\")"));
+        assert!(source.contains("convert -f raw -O vhdx"));
+        assert!(source.contains("if ($currentSize -lt $desiredSize)"));
     }
 
     #[test]

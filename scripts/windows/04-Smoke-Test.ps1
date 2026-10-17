@@ -96,12 +96,18 @@ try {
     "compose", "status", "-f", $ComposePath, "--backend", "hyperv", "--json"
   )
   $status = $statusText | ConvertFrom-Json
-  $containers = @($status.PSObject.Properties)
+  # Compose status --json wraps Hyper-V container states in the hyperv object.
+  # Do not accidentally treat top-level native/hyperv metadata as containers.
+  if ($null -eq $status.hyperv) {
+    throw "Compose status JSON did not contain the Hyper-V container map."
+  }
+  $containers = @($status.hyperv.PSObject.Properties)
   if ($containers.Count -eq 0) {
-    throw "Smoke status did not contain any containers."
+    throw "Smoke status did not contain any Hyper-V containers."
   }
   foreach ($container in $containers) {
-    if (-not $container.Value.running -or
+    if ($container.Value.exists -ne $true -or
+        $container.Value.running -ne $true -or
         $container.Value.status -notin @("running", "healthy")) {
       throw "Smoke container '$($container.Name)' is not running and healthy: $($container.Value.status)"
     }

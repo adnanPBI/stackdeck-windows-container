@@ -1,7 +1,7 @@
 {
   "schema": "https://stackdeck.dev/schemas/windows-runtime-lock-v1.json",
-  "image_url": "https://cloud.debian.org/images/cloud/bookworm/20260806-2562/debian-12-genericcloud-amd64-20260806-2562.qcow2",
-  "image_sha512": "3622c990108a044ed411652f8741e77c5822c365114d7b940206b243f8fb617b8586792df4cdb7afba1b71d1a09289d8ed632124688f2c8352cb08190a1e9868",
+  "image_url": "https://cloud.debian.org/images/cloud/bookworm/20260806-2562/debian-12-azure-amd64-20260806-2562.tar.xz",
+  "image_sha512": "b8fca03af3b6dd4eaa714d18ad678325c064218dfcb949c6162f3d1bc1e73da3fd03acd2e312dc9d4caa5863216e22c244d745d4dffefcaaf8d47946ada3c213",
   "debian_snapshot_timestamp": "20260806T120000Z",
   "nerdctl_version": "2.3.5",
   "nerdctl_sha256_amd64": "b697295c623639734aaab737523c808fd3cc8d3046039fd94fff1744e4c317aa"
