@@ -2039,8 +2039,6 @@ if ($dnsIp) {{
             service_hostname(&svc.name),
             "--network".to_string(),
             network,
-            "--network-alias".to_string(),
-            svc.name.clone(),
         ];
 
         let restart = if svc.restart == "always" || svc.restart == "unless-stopped" {
@@ -4059,6 +4057,15 @@ mod tests {
         assert_eq!(parsed.ssh_port, 22);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_nerdctl_run_does_not_emit_docker_only_network_alias_flag() {
+        // nerdctl v2.3.5 rejects Docker's --network-alias at container run time.
+        // Service hostname and CNI network setup are tested separately on a guest.
+        let source = include_str!("lib.rs");
+        let unsupported_argument = ["\"", "--network-alias", "\".to_string()"].concat();
+        assert!(!source.contains(&unsupported_argument));
     }
 
     #[test]
