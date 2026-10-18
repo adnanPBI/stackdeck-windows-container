@@ -13,7 +13,7 @@
   IfFileExists "$LOCALAPPDATA\StackDeck\uninstall.exe" SD_HISTORICAL_USER_INSTALL_FOUND SD_HISTORICAL_USER_INSTALL_CLEARED
 
 SD_HISTORICAL_USER_INSTALL_FOUND:
-  MessageBox MB_OK|MB_ICONSTOP /SD IDOK "An older per-user StackDeck installation is present. The v0.6.0 installer is machine-wide and will not overwrite the old user's installation. Back up the original user's StackDeck data and use Windows Apps to uninstall v0.5.0 while signed in as that user, then rerun this installer as an administrator. For a different Windows user, an administrator must first review that user's installation separately."
+  MessageBox MB_OK|MB_ICONSTOP "An older per-user StackDeck installation was detected. Preserve the user data, uninstall v0.5.0 from the original Windows account, and then install machine-wide v0.6.0. This installer will not overwrite a per-user copy." /SD IDOK
   SetErrorLevel 1603
   Quit
 
