@@ -28,7 +28,13 @@ $required = @(
   'docs\WINDOWS_RELEASE_QUALIFICATION_2026-10-13.md',
   'docs\WINDOWS_NSIS_CROSS_SCOPE_MIGRATION.md',
   'scripts\windows\20-Inspect-Legacy-NSIS-Upgrade.ps1',
-  'desktop\stackdeck\src-tauri\windows\hooks.nsh'
+  'desktop\stackdeck\src-tauri\windows\hooks.nsh',
+  'scripts\windows\21-Collect-StackDeckSupport.ps1',
+  'scripts\windows\22-Test-NSIS-Guard.ps1',
+  'scripts\windows\23-Test-Support-Collector.ps1',
+  'docs\SUPPORT_AND_TROUBLESHOOTING.md',
+  'docs\UNSIGNED_PREVIEW_RELEASE.md',
+  '.github\workflows\preview-windows.yml'
 )
 foreach ($relative in $required) {
   $path = Join-Path $repoRoot $relative

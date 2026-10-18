@@ -1,6 +1,6 @@
 # StackDeck / StackDeck Hyper-V Container Runtime
 
-Release candidates, signing requirements, clean-client qualification, and final publication are governed by [RELEASE_GATES.md](RELEASE_GATES.md). Passing source/build tests alone is not permission to publish an unsigned or unqualified Windows installer.
+Release candidates, signing requirements, clean-client qualification, and final publication are governed by [RELEASE_GATES.md](RELEASE_GATES.md). Passing source/build tests alone is not permission to claim an unsigned or unqualified Windows installer is stable. An explicitly labeled [unsigned evaluation pre-release](docs/UNSIGNED_PREVIEW_RELEASE.md) is available as a separate, lower-assurance route for experienced testers; it is not a trusted, production-approved release. For installed-version errors, see [support logs and troubleshooting](docs/SUPPORT_AND_TROUBLESHOOTING.md).
 
 This repository is a **Rust-first Windows container orchestration project**. It is not a Python package and it does not ship a Python zipapp. The main deliverables are:
 
@@ -97,8 +97,12 @@ A publishable Windows release must use the protected signed-release workflow or
 `scripts\windows\09-Build-Signed-Release.ps1`. The release sequence is
 **build payloads -> sign payloads -> bundle MSI/NSIS -> sign installers ->
 extract/verify embedded signatures -> checksums/provenance/attestation**.
-`npm run package:windows:unsigned` exists only for local packaging diagnostics
-and must never be published.
+`npm run package:windows:unsigned` is for local packaging diagnostics and
+must never be represented as a signed production installer. An explicit
+`preview-v0.6.0-*` tag can separately trigger the controlled **unsigned
+pre-release** CI workflow for technical evaluation only, subject to its own
+hash/provenance gates and prominent unsigned warnings. See
+`docs/UNSIGNED_PREVIEW_RELEASE.md`.
 
 Do not run `cargo build -p stackdeck` and then `tauri bundle`: a direct Cargo
 build uses Tauri's development URL and produces an installer that tries to open

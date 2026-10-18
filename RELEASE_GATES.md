@@ -12,7 +12,7 @@ Windows 11 Pro, Enterprise or Education x86-64, with working Hyper-V, Default Sw
 4. Build the two binaries using `cargo build -p stackdeck-cli --bin stackdeck-cli --release --locked` and the equivalent command for `stackdeck-hive`.
 5. From `desktop/stackdeck`, run `npm ci`, `npm audit --audit-level=moderate`, and `npm run build`.
 6. Prepare unsigned local test installers with `scripts/windows/15-Build-Local-Go-Package.ps1`. Never publish them as signed production media.
-7. Verify the extracted MSI and NSIS payload hashes using `scripts/windows/10-Verify-Installer-Payloads.ps1 -ExpectedPayloadManifest <manifest> -SkipSignature`. The signature bypass is only for local testing.
+7. Verify the extracted MSI and NSIS payload hashes using `scripts/windows/10-Verify-Installer-Payloads.ps1 -ExpectedPayloadManifest <manifest> -SkipSignature`. The signature bypass is permitted for local functional testing and the separately labeled, hash-verified **unsigned preview workflow** only; it never constitutes production signature acceptance.
 8. Export a committed source handover with `scripts/windows/14-Package-Source-Handover.ps1 -OutputZip <path>` after all intended files are committed.
 
 ## Independent clean-client qualification (Administrator)
@@ -33,10 +33,16 @@ The `.github/workflows/release-windows.yml` workflow can publish only from a rel
 
 Configure protected GitHub Environment `windows-release` and require human approval. Provide the following protected variables: `WINDOWS_RUNTIME_IMAGE_URL`, `WINDOWS_RUNTIME_IMAGE_SHA512`, `WINDOWS_DEBIAN_SNAPSHOT_TIMESTAMP`, `WINDOWS_NERDCTL_VERSION`, `WINDOWS_NERDCTL_SHA256_AMD64`, `WINDOWS_QUALIFIED_SOURCE_COMMIT`, and `WINDOWS_QUALIFICATION_EVIDENCE_SHA256`. The qualified commit must equal the exact tagged source commit, and the evidence digest must match the separately archived clean-client qualification report.
 
-Configure code-signing secrets: `WINDOWS_SIGNING_CERT_PFX_B64`, `WINDOWS_SIGNING_CERT_PASSWORD`, and `WINDOWS_SIGNING_CERT_THUMBPRINT`. Use a currently valid publicly trusted code-signing identity that authorizes the publisher; self-signed developer certificates cannot qualify a public release. Keep the PFX and password out of source and logs.
+Use the **DigiCert KeyLocker** workflow in `docs/DIGICERT_KEYLOCKER_SIGNING.md`. Required protected secrets are `SM_API_KEY`, `SM_CLIENT_CERT_FILE_B64`, `SM_CLIENT_CERT_PASSWORD` and `WINDOWS_SIGNING_CERT_THUMBPRINT`; protected variables are `SM_HOST` and `WINDOWS_SIGNING_KEYPAIR_ALIAS`, in addition to the runtime/qualification variables above. The client-auth P12 is **not** the exportable signing private key. The publisher must enroll a publicly trusted, HSM-backed signing certificate, independently prove trust and remote-key custody, and verify a real timestamped Authenticode signing challenge. Never substitute the local self-signed developer certificate or print credentials to CI logs.
 
 The signed workflow runs locked tests, signs CLI/hive and desktop payloads *before* MSI/NSIS bundling, signs installers, extracts and verifies exact embedded hashes and Authenticode signatures, creates checksums and provenance, requests GitHub artifact attestation, and publishes exactly seven verified release assets. A manual workflow dispatch creates CI artifacts but does not create a public GitHub release.
 
+## Distinct UNSIGNED evaluation preview (not production GO)
+
+For research and technically experienced testers only, a Git tag named `preview-v0.6.0-` plus the first 12 characters of the exact commit can trigger `.github/workflows/preview-windows.yml`. The workflow rebuilds Windows MSI/NSIS binaries from the tag, runs the locked Rust and packaging/payload tests, creates checksums and provenance, and publishes a **GitHub pre-release** explicitly identifying its assets as unsigned and experimental. It never publishes from a stable `v*` tag and never substitutes for the trusted signing workflow. Review `docs/UNSIGNED_PREVIEW_RELEASE.md` before distributing or recommending it. Do not bypass SmartScreen, Smart App Control or organizational policy; use a dedicated backed-up Windows 11 test host without valuable VMs. Release notes must disclose the missing independent fresh-profile and host-restart gates and any known installation compatibility gaps.
+
+The presence of a GitHub pre-release is not a completed functional or security qualification. A source commit, artifact hash and automated test report are evidence of build provenance/integrity, not publisher identity or third-party trust. Do not market an unsigned preview as stable or suitable for production environments.
+
 ## NO-GO conditions
 
-Do not create/push the final `v0.6.0` tag or publish a public release if the machine-side Hyper-V tests, clean-client installation matrix, trustworthy certificate, release evidence SHA-256, or protected GitHub settings have not been independently verified. A local source candidate tag is not a production release.
+Do not create/push the final **stable** `v0.6.0` tag or publish a production release if the machine-side Hyper-V tests, clean-client installation matrix, trustworthy certificate, release evidence SHA-256, or protected GitHub settings have not been independently verified. A preview tag is not a production release.
