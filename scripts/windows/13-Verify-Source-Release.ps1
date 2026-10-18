@@ -25,7 +25,10 @@ $required = @(
   'scripts\windows\15-Build-Local-Go-Package.ps1',
   'scripts\windows\16-Ensure-Prebuilt-Runtime-Prereqs.ps1',
   'scripts\windows\17-Elevated-Release-Preflight.ps1',
-  'docs\WINDOWS_RELEASE_QUALIFICATION_2026-10-13.md'
+  'docs\WINDOWS_RELEASE_QUALIFICATION_2026-10-13.md',
+  'docs\WINDOWS_NSIS_CROSS_SCOPE_MIGRATION.md',
+  'scripts\windows\20-Inspect-Legacy-NSIS-Upgrade.ps1',
+  'desktop\stackdeck\src-tauri\windows\hooks.nsh'
 )
 foreach ($relative in $required) {
   $path = Join-Path $repoRoot $relative
@@ -37,6 +40,15 @@ foreach ($relative in $required) {
 $tauri = Get-Content -LiteralPath (Join-Path $repoRoot 'desktop\stackdeck\src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
 if ([string]$tauri.bundle.windows.nsis.installMode -ne 'perMachine') {
   throw 'NSIS installMode must be perMachine so installed-client tooling and Program Files layout agree.'
+}
+if ([string]$tauri.bundle.windows.nsis.installerHooks -ne './windows/hooks.nsh') {
+  throw 'NSIS must include the guarded historical currentUser to perMachine migration hook.'
+}
+$nsisGuard = Get-Content -LiteralPath (Join-Path $repoRoot 'desktop\stackdeck\src-tauri\windows\hooks.nsh') -Raw
+foreach ($guard in @('NSIS_HOOK_PREINSTALL','HKCU','LOCALAPPDATA','SD_HISTORICAL_USER_INSTALL_FOUND','SetErrorLevel 1603','Quit')) {
+  if (-not $nsisGuard.Contains($guard)) {
+    throw "Historical per-user NSIS collision guard missing: $guard"
+  }
 }
 # Explicit Tauri target is mandatory: CARGO_BUILD_TARGET does not guarantee
 # where `tauri bundle` writes installers when called as a separate command.

@@ -42,7 +42,8 @@
     "windows": {
       "nsis": {
         "displayLanguageSelector": false,
-        "installMode": "perMachine"
+        "installMode": "perMachine",
+        "installerHooks": "./windows/hooks.nsh"
       },
       "webviewInstallMode": {
         "type": "offlineInstaller",
