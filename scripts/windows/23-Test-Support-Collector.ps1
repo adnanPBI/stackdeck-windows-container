@@ -65,7 +65,7 @@ finally{
  if(Test-Path $syntheticLog){Remove-Item -LiteralPath $syntheticLog -Force -ErrorAction SilentlyContinue}
  if(Test-Path $root){Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue}
  if($Output){
-  $target=[IO.Path]::GetFullPath($Output)
+  $target=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
   if(Test-Path $target){throw 'QA output exists; refusing overwrite'}
   [IO.File]::WriteAllText($target,($record|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
  }

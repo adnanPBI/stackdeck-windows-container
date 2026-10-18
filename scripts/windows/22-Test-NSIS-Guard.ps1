@@ -92,7 +92,7 @@ finally{
  $record.passed=($record.compile_exit -eq 0 -and $record.simulated_legacy_rejected -and
    $record.clean_current_user_allowed -and $record.original_registry_preserved -and !$record.error)
  if($Output){
-  $full=[IO.Path]::GetFullPath($Output)
+  $full=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
   if(Test-Path -LiteralPath $full){throw 'QA evidence destination exists'}
   [IO.File]::WriteAllText($full,($record|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
  }
