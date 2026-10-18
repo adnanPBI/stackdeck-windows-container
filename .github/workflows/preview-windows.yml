@@ -60,6 +60,18 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw '7-Zip setup failed' }
           }
 
+      - name: Bootstrap Tauri sidecar for clean runner workspace tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & cargo build -p stackdeck-cli --bin stackdeck-hive --release --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot build required Tauri sidecar for workspace tests' }
+          .\desktop\stackdeck\scripts\stage-hive.ps1
+          if (-not $?) { throw 'Could not stage Tauri sidecar for workspace tests' }
+          $sidecar = 'desktop/stackdeck/src-tauri/bin/stackdeck-hive-x86_64-pc-windows-msvc.exe'
+          if (!(Test-Path -LiteralPath $sidecar -PathType Leaf)) { throw 'Tauri sidecar missing before cargo workspace test' }
+          Write-Host ('STAGED_HIVE_SHA256=' + (Get-FileHash -LiteralPath $sidecar -Algorithm SHA256).Hash.ToLowerInvariant())
+
       - name: Rust format, full locked tests, source contract
         shell: pwsh
         run: |
