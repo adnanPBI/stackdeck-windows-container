@@ -9,6 +9,7 @@
 | Tested behavior | Evidence on RND | Status |
 |---|---|---|
 | Existing pinned image listing, new named volume and bridge network, inspect/list | `target/release-evidence/20261019-image-volume-network-live-v4.json` | PASS |
+| Authenticated public registry pull of `busybox:1.36.1`, image listing, Docker-spec image inspect (`/images/<name>/json`), removal and absence after cleanup | `target/release-evidence/20261019-image-registry-pull-inspect-delete-v2.json` | PASS |
 | Volume data survived deletion and recreation of its container | Same report | PASS |
 | Scoped removal of only test volume/network/container, VM and config preserved | Same report | PASS |
 | Dockerfile via Compose/BuildKit, tagged image, built container and unique HTTP 200 content, exact-resource cleanup | `target/release-evidence/20261019-buildkit-dockerfile-live.json` | PASS |

@@ -300,7 +300,8 @@ Authentication is required unless explicitly running in insecure local mode thro
 ### RND container and unattended host recovery qualification (2026-10-19)
 
 The installed RND candidate passed real named-volume persistence, bridge-network lifecycle,
-Dockerfile/BuildKit image build and HTTP 200, and a bearer-authenticated Docker REST **subset**.
+authenticated registry image pull/inspect/remove, Dockerfile/BuildKit image build and HTTP 200,
+and a bearer-authenticated Docker REST **subset**.
 Its S4U startup task now owns its API child through a kill-on-close Windows Job Object;
 controlled stop/start releases and restores port 23750 without an orphan. A separate S4U
 postboot evidence task is armed, **but an actual Windows host reboot is not yet qualified**.
