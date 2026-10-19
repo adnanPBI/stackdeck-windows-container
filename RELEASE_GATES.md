@@ -43,6 +43,12 @@ For research and technically experienced testers only, a Git tag named `preview-
 
 The presence of a GitHub pre-release is not a completed functional or security qualification. A source commit, artifact hash and automated test report are evidence of build provenance/integrity, not publisher identity or third-party trust. Do not market an unsigned preview as stable or suitable for production environments.
 
+## RND functional qualification update — 2026-10-19
+
+On the exact approved existing `stackdeck-linux` VM, installed-image/named-volume/bridge-network lifecycle (including data persistence through container recreation), an actual BuildKit Dockerfile build and HTTP 200, and the supported Docker REST API subset passed. The protected S4U startup task plus job-object child supervision passed a controlled stop/start test with exact API port release, bearer HTTP 200 and unauthorized HTTP 401. A distinct postboot verifier was armed and its current-boot negative test correctly refused to claim a real reboot. See `docs/RND_CONTAINER_AND_HOST_RESTART_ACCEPTANCE_20261019.md`.
+
+**Still NO-GO for production:** RND had open Excel/browser processes and an interactive console; an actual host restart was not performed, so the full reboot, DHCP portproxy and workload HTTP recovery gates are pending. RND-specific scripts are not a generic supported installer for an independent clean Windows machine. The signed stable release, clean-client matrix and release approvals are unaffected and remain blocked.
+
 ## NO-GO conditions
 
 Do not create/push the final **stable** `v0.6.0` tag or publish a production release if the machine-side Hyper-V tests, clean-client installation matrix, trustworthy certificate, release evidence SHA-256, or protected GitHub settings have not been independently verified. A preview tag is not a production release.

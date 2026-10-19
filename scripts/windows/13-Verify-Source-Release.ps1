@@ -32,6 +32,12 @@ $required = @(
   'scripts\windows\21-Collect-StackDeckSupport.ps1',
   'scripts\windows\22-Test-NSIS-Guard.ps1',
   'scripts\windows\23-Test-Support-Collector.ps1',
+  'scripts\windows\24-Run-Unattended-HostRecovery.ps1',
+  'scripts\windows\25-Install-Unattended-HostRecovery.ps1',
+  'scripts\windows\26-Verify-PostHostRestart.ps1',
+  'scripts\windows\27-Arm-PostHostRestart-Proof.ps1',
+  'scripts\windows\29-Test-Headless-ServiceRestart.ps1',
+  'docs\RND_CONTAINER_AND_HOST_RESTART_ACCEPTANCE_20261019.md',
   'docs\SUPPORT_AND_TROUBLESHOOTING.md',
   'docs\UNSIGNED_PREVIEW_RELEASE.md',
   '.github\workflows\preview-windows.yml'
@@ -41,6 +47,35 @@ foreach ($relative in $required) {
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
     throw "Required release source file is missing: $relative"
   }
+}
+
+# RND-only startup/verification tooling is packaged as source, not silently
+# installed on unrelated Windows hosts. Validate syntax and critical guards.
+$recoveryScripts = @(
+  '24-Run-Unattended-HostRecovery.ps1',
+  '25-Install-Unattended-HostRecovery.ps1',
+  '26-Verify-PostHostRestart.ps1',
+  '27-Arm-PostHostRestart-Proof.ps1',
+  '29-Test-Headless-ServiceRestart.ps1'
+)
+foreach ($name in $recoveryScripts) {
+  $scriptPath = Join-Path $repoRoot ('scripts\windows\' + $name)
+  $parseTokens = $null
+  $parseErrors = $null
+  [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+  if ($parseErrors -and $parseErrors.Count -gt 0) { throw "Windows recovery script failed PowerShell parsing: $name" }
+}
+$recoverySource = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\windows\24-Run-Unattended-HostRecovery.ps1') -Raw
+if ($recoverySource -notmatch 'CreateKillOnCloseJob' -or
+    $recoverySource -notmatch 'AssignProcessToJobObject' -or
+    $recoverySource -notmatch 'approvedVM|expectedVM' -or
+    $recoverySource -notmatch 'STACKDECK_DOCKER_API_REQUIRE_TOKEN') {
+  throw 'Headless Windows recovery lost approved-VM, authenticated API, or orphan-process safeguards.'
+}
+$postbootSource = Get-Content -LiteralPath (Join-Path $repoRoot 'scripts\windows\26-Verify-PostHostRestart.ps1') -Raw
+if ($postbootSource -notmatch 'actual_host_restart_observed' -or
+    $postbootSource -notmatch 'production_reboot_acceptance_pass') {
+  throw 'Postboot verification must not pass without an actual Windows reboot.'
 }
 
 $tauri = Get-Content -LiteralPath (Join-Path $repoRoot 'desktop\stackdeck\src-tauri\tauri.conf.json') -Raw | ConvertFrom-Json
