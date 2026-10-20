@@ -43,6 +43,10 @@ For research and technically experienced testers only, a Git tag named `preview-
 
 The presence of a GitHub pre-release is not a completed functional or security qualification. A source commit, artifact hash and automated test report are evidence of build provenance/integrity, not publisher identity or third-party trust. Do not market an unsigned preview as stable or suitable for production environments.
 
+### Published unsigned evaluation checkpoint — 2026-10-20
+
+The exact tag [`preview-v0.6.0-c9607be36cc9`](https://github.com/adnanPBI/stackdeck-windows-container/releases/tag/preview-v0.6.0-c9607be36cc9) published an **unsigned prerelease** after clean Windows [Actions run 39409784504](https://github.com/adnanPBI/stackdeck-windows-container/actions/runs/39409784504) completed success: locked Rust/source checks, independent MSI+NSIS builds, migration guard and support-log redaction tests, and embedded payload SHA-256 inspection. The RND installed Hive separately passed two original smoke cycles; the candidate passed three cycles. [Public-safe acceptance matrix and evidence digests](docs/STACKDECK_V060_PUBLIC_QUALIFICATION_20261020.md) detail the completed checks and limitations. **No stable `v0.6.0` release, trusted signing, real host restart or independent fresh-machine installer acceptance is implied.**
+
 ## RND functional qualification update — 2026-10-19
 
 On the exact approved existing `stackdeck-linux` VM, authenticated registry image pull/inspect/delete, installed-image/named-volume/bridge-network lifecycle (including data persistence through container recreation), an actual BuildKit Dockerfile build and HTTP 200, and the supported Docker REST API subset passed. The protected S4U startup task plus job-object child supervision passed a controlled stop/start test with exact API port release, bearer HTTP 200 and unauthorized HTTP 401. A distinct postboot verifier was armed and its current-boot negative test correctly refused to claim a real reboot. See `docs/RND_CONTAINER_AND_HOST_RESTART_ACCEPTANCE_20261019.md`.

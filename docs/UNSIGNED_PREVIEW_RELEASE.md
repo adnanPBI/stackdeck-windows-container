@@ -1,5 +1,7 @@
 # StackDeck v0.6.0 — UNSIGNED EVALUATION PREVIEW
 
+**Published developer evaluation:** [GitHub prerelease `preview-v0.6.0-c9607be36cc9`](https://github.com/adnanPBI/stackdeck-windows-container/releases/tag/preview-v0.6.0-c9607be36cc9), source commit `c9607be36cc9acb14bd13020625b02a7a9838e9e`. The independent [Windows Actions run #39409784504](https://github.com/adnanPBI/stackdeck-windows-container/actions/runs/39409784504) completed successfully. [Verified functionality, private evidence hashes, and remaining blockers](STACKDECK_V060_PUBLIC_QUALIFICATION_20261020.md) are documented separately.
+
 > **Experimental, unsigned, not a stable production release.**
 > This package is offered for technically experienced Windows 11 Hyper-V
 > evaluators, not for unrestricted business deployment. Publisher-trusted code

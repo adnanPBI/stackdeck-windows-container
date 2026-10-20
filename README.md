@@ -1,6 +1,35 @@
 # StackDeck / StackDeck Hyper-V Container Runtime
 
-Release candidates, signing requirements, clean-client qualification, and final publication are governed by [RELEASE_GATES.md](RELEASE_GATES.md). Passing source/build tests alone is not permission to claim an unsigned or unqualified Windows installer is stable. An explicitly labeled [unsigned evaluation pre-release](docs/UNSIGNED_PREVIEW_RELEASE.md) is available as a separate, lower-assurance route for experienced testers; it is not a trusted, production-approved release. For installed-version errors, see [support logs and troubleshooting](docs/SUPPORT_AND_TROUBLESHOOTING.md).
+**Latest public version: [v0.6.0 UNSIGNED EVALUATION PREVIEW](https://github.com/adnanPBI/stackdeck-windows-container/releases/tag/preview-v0.6.0-c9607be36cc9)** (published 20 October 2026). **Not a stable or trusted production installer.**
+
+[Download MSI](https://github.com/adnanPBI/stackdeck-windows-container/releases/download/preview-v0.6.0-c9607be36cc9/StackDeck_0.6.0_x64_en-US.msi) · [Download NSIS EXE](https://github.com/adnanPBI/stackdeck-windows-container/releases/download/preview-v0.6.0-c9607be36cc9/StackDeck_0.6.0_x64-setup.exe) · [Release checksums and provenance](https://github.com/adnanPBI/stackdeck-windows-container/releases/tag/preview-v0.6.0-c9607be36cc9) · [Successful independent Windows CI](https://github.com/adnanPBI/stackdeck-windows-container/actions/runs/39409784504)
+
+StackDeck is a **native Windows Hyper-V container manager and Docker Desktop alternative for the workflows tested**, using a Rust CLI, Tauri/React desktop, and a single controlled Debian VM running **containerd, nerdctl and BuildKit**. **No Docker Desktop, WSL/WSL2, or host Docker Engine required.** It is *not* full Docker Engine API compatibility and should not be presented as an unqualified drop-in replacement.
+
+### What demonstrably works in the v0.6.0 evaluation
+
+- **Images, containers, volumes, networks:** local pull/inspect/delete and named-volume/network lifecycle; OCI container create/start/stop/teardown on the approved Hyper-V guest.
+- **Dockerfile/BuildKit, Compose, TCP networking:** real builds, healthy Nginx Compose and Windows HTTP 200; guarded, project-scoped teardown verified across **3 candidate cycles plus 2 exact installed-app smoke runs**.
+- **Docker API subset:** local, bearer-token-protected compatibility endpoints. Authenticated 200, unauthenticated 401; **not** every Docker endpoint or `unless-stopped` behavior.
+- **Desktop, CLI and packaging:** locked Rust tests **124 passed, 0 failed** locally; Tauri/React frontend, unsigned MSI + NSIS and their embedded payloads **passed independent GitHub Actions** at exact tagged source `c9607be36cc9`. This qualifies builds, not independent fresh-device installations.
+- **Recovery safeguards:** protected S4U startup task and current-boot health passed; all **13/13 encrypted off-device backup hashes** and **5/5 AES-GCM-authenticated VM export components** checked in memory. A *real Windows reboot and application recovery* have **not** been proven.
+
+**Stable production release: NO-GO.** Required next: a safe actual Windows host restart and owned workload/portproxy recovery, clean Windows MSI+NSIS/fresh-profile/upgrade qualification, independent recovery-key escrow and isolated restore, publicly trusted timestamped publisher signing, and approved exact-source/evidence gates. Never weaken Windows security settings to bypass unsigned installer blocks.
+
+[Full October 20 acceptance evidence and hashes](docs/STACKDECK_V060_PUBLIC_QUALIFICATION_20261020.md) · [Release gates](RELEASE_GATES.md) · [Unsigned preview guidance](docs/UNSIGNED_PREVIEW_RELEASE.md) · [Troubleshooting and support logs](docs/SUPPORT_AND_TROUBLESHOOTING.md) · [Publishing kit](docs/STACKDECK_V060_PUBLICATION_KIT_20261020.md)
+
+### Quick checks (elevated PowerShell, after installing on an isolated supported test machine)
+
+```powershell
+& "C:\Program Files\StackDeck\stackdeck-hive.exe" hyperv health
+& "C:\Program Files\StackDeck\stackdeck-hive.exe" hyperv ps
+# On a checked-out source tree, after the runtime is initialized:
+.\scripts\windows\04-Smoke-Test.ps1 -StackDeckExe "C:\Program Files\StackDeck\stackdeck-hive.exe"
+```
+
+Never create, rename, replace, or delete an unapproved Hyper-V VM to run these tests. Back up evaluation workloads first. **Install either MSI or NSIS, never both.**
+
+Release candidates, signing requirements, clean-client qualification, and final publication are governed by [RELEASE_GATES.md](RELEASE_GATES.md). Passing source/build tests alone is not permission to claim an unsigned or unqualified Windows installer is stable. An explicitly labeled [unsigned evaluation pre-release](docs/UNSIGNED_PREVIEW_RELEASE.md) is available as a separate, lower-assurance route for experienced testers; it is not a trusted, production-approved release.
 
 This repository is a **Rust-first Windows container orchestration project**. It is not a Python package and it does not ship a Python zipapp. The main deliverables are:
 
