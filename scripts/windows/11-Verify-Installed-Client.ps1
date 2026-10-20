@@ -98,7 +98,11 @@ if (-not $SkipSignature) {
     Add-Check "Authenticode: $($entry.Name)" ($sig.Status -eq "Valid") "$($sig.Status); signer=$signer"
   }
 } else {
-  Add-Check "Authenticode verification" $true "SKIPPED - pre-signing functional qualification only"
+  $results.Add([pscustomobject]@{
+    check = "Authenticode verification"
+    status = "SKIPPED"
+    detail = "Pre-signing functional qualification only; not signed-release approval"
+  })
 }
 
 if ($hive.Count -eq 1) {
@@ -136,7 +140,8 @@ $summary = [ordered]@{
   install_root = $InstallRoot
   signature_checks_skipped = [bool]$SkipSignature
   passed = -not [bool]($results | Where-Object { $_.status -eq "FAIL" })
-  checks = @($results)
+  # Windows PowerShell 5.1 cannot array-coerce List[object] with @($results).
+  checks = $results.ToArray()
 }
 
 $outputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)

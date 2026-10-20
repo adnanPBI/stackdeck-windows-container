@@ -35,6 +35,22 @@ if (Test-Path -LiteralPath (Join-Path $root 'seed') -PathType Container) {
 }
 "#;
 
+/// Recheck VM registry and target VM disk *after* this same initialization
+/// generated its cloud-init seed. Do not reject our just-created seed media.
+const VM_FINAL_CREATION_SAFETY_GUARD: &str = r#"
+$cimRegistered = @(Get-CimInstance -Namespace 'root\virtualization\v2' -ClassName Msvm_ComputerSystem -ErrorAction Stop |
+    Where-Object { $_.Caption -eq 'Virtual Machine' -and $_.ElementName -eq $name })
+if ($cimRegistered.Count -gt 0) {
+    throw "VM '$name' is registered. Refusing to overwrite or remove an existing VM."
+}
+$inventory = @(Get-VM -ErrorAction Stop)
+if (@($inventory | Where-Object { $_.Name -eq $name }).Count -gt 0) {
+    throw "VM '$name' already exists. Refusing to overwrite or remove it."
+}
+if (Test-Path -LiteralPath $disk -PathType Leaf) {
+    throw "The VM disk '$disk' already exists. Refusing to overwrite it."
+}
+"#;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -854,7 +870,7 @@ if (-not {no_start}) {{ Start-VM -Name $name | Out-Null }}
             disk_gb = self.config.vm_disk_gb.max(MIN_VM_DISK_GB),
             memory_mb = self.config.vm_memory_mb.max(1024),
             cpus = self.config.vm_cpu_count.max(1),
-            vm_safety_guard = VM_CREATION_SAFETY_GUARD,
+            vm_safety_guard = VM_FINAL_CREATION_SAFETY_GUARD,
             no_start = if no_start { "$true" } else { "$false" },
         );
         self.ps(&script, true, Some(240))?;
@@ -966,8 +982,7 @@ sudo rm -f /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/d
 printf 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/%s/ bookworm main\n' "$SNAPSHOT" | sudo tee /etc/apt/sources.list >/dev/null
 sudo apt-get -o Acquire::Check-Valid-Until=false update -y
 sudo apt-get -o Acquire::Check-Valid-Until=false install -y ca-certificates curl gnupg containerd cifs-utils cloud-guest-utils containernetworking-plugins uidmap iptables
-sudo growpart /dev/sda 1 || true
-sudo resize2fs /dev/sda1 || true
+# Cloud-init expands the filesystem mounted at /; device names vary on Hyper-V.
 sudo systemctl enable --now containerd
 if ! command -v nerdctl >/dev/null 2>&1 || ! command -v buildctl >/dev/null 2>&1 || ! command -v buildkitd >/dev/null 2>&1; then
   ARCH=$(uname -m)
@@ -1003,7 +1018,7 @@ UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now buildkit
 sudo systemctl is-active --quiet buildkit
-buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null
+sudo buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null
 sudo nerdctl --namespace stackdeck version >/dev/null
 "#,
             snapshot = runtime.debian_snapshot_timestamp,
@@ -1116,6 +1131,37 @@ if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {{
         let extract_dir = PathBuf::from(&self.config.vm_root)
             .join("images")
             .join(format!("{}.extracted", archive_stem(source)));
+        // Official Debian Azure xz media must contain only disk.raw. The
+        // member check prevents archives from injecting or replacing other
+        // files, and the extraction directory must never be overwritten.
+        let is_azure_xz = source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|name| name.to_ascii_lowercase().ends_with(".tar.xz"))
+            .unwrap_or(false);
+        if is_azure_xz {
+            let listed = self.run_cmd(
+                &[
+                    "tar".to_string(),
+                    "-tf".to_string(),
+                    source.to_string_lossy().to_string(),
+                ],
+                true,
+                Some(180),
+            )?;
+            let members: Vec<&str> = listed.lines().map(str::trim).collect();
+            if members != ["disk.raw"] {
+                return Err(HyperVError::Config(
+                    "Debian Azure archive must contain exactly one disk.raw member".into(),
+                ));
+            }
+        }
+        if extract_dir.exists() && std::fs::read_dir(&extract_dir)?.next().is_some() {
+            return Err(HyperVError::Config(format!(
+                "cloud archive extraction destination is not empty: {}",
+                extract_dir.display()
+            )));
+        }
         std::fs::create_dir_all(&extract_dir)?;
 
         self.run_cmd(
@@ -1132,7 +1178,7 @@ if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {{
 
         find_disk_image(&extract_dir).ok_or_else(|| {
             HyperVError::Config(format!(
-                "archive {} did not contain a .vhdx or .vhd image",
+                "archive {} did not contain a supported virtual disk image",
                 source.display()
             ))
         })
@@ -1200,12 +1246,21 @@ if (-not $qemuPath) {{
   }}
 }}
 if (-not $qemuPath) {{ throw 'qemu-img is required to convert qcow2/img cloud images to VHDX. Install QEMU/qemu-img, add it to PATH, or provide a pre-converted .vhdx with --image-vhdx.' }}
-& $qemuPath convert -O vhdx -o subformat=dynamic $src $out
+# Explicitly treat official Azure disk.raw as raw bytes; keep existing
+# format detection for qcow2, img and other supported source types.
+if ([IO.Path]::GetExtension($src) -ieq '.raw') {{
+  & $qemuPath convert -f raw -O vhdx -o subformat=dynamic $src $out
+}} else {{
+  & $qemuPath convert -O vhdx -o subformat=dynamic $src $out
+}}
 if ($LASTEXITCODE -ne 0) {{ throw "qemu-img convert failed with exit code $LASTEXITCODE" }}
 compact.exe /U $out | Out-Null
 fsutil sparse setflag $out 0 2>$null | Out-Null
 attrib -S -C $out 2>$null
-Resize-VHD -Path $out -SizeBytes {disk_gb}GB
+# Never shrink the publisher's 30-GiB Azure image to a smaller VM default.
+$currentSize = (Get-VHD -Path $out -ErrorAction Stop).Size
+$desiredSize = {disk_gb}GB
+if ($currentSize -lt $desiredSize) {{ Resize-VHD -Path $out -SizeBytes $desiredSize -ErrorAction Stop }}
 "#,
             src = ps_quote(&source.to_string_lossy()),
             out = ps_quote(&output.to_string_lossy()),
@@ -2024,20 +2079,13 @@ if ($dnsIp) {{
             service_hostname(&svc.name),
             "--network".to_string(),
             network,
-            "--network-alias".to_string(),
-            svc.name.clone(),
         ];
 
-        let restart = if svc.restart == "always" || svc.restart == "unless-stopped" {
-            "always".to_string()
-        } else if svc.restart == "on-failure" {
-            svc.restart_max_retries
-                .filter(|retries| *retries > 0)
-                .map(|retries| format!("on-failure:{retries}"))
-                .unwrap_or_else(|| "on-failure".to_string())
-        } else {
-            "no".to_string()
-        };
+        // The pinned nerdctl 2.3.5 `run` command only accepts `always` for
+        // auto-restart (even though its `update --help` lists unless-stopped).
+        // Emulate controlled Compose down by explicitly disabling auto-restart
+        // in stop_service before stopping/removing the container.
+        let restart = nerdctl_restart_policy(&svc.restart, svc.restart_max_retries);
         args.extend(["--restart".to_string(), restart]);
         args.extend([
             "--label".to_string(),
@@ -2469,7 +2517,139 @@ if ($dnsIp) {{
         }
 
         let cname = container_name(&svc.project, &svc.name);
-        self.ssh(&nerdctl_command(&self.config, &["rm", "-f", &cname]), true)
+        // A container with a restart supervisor can race `nerdctl rm -f`:
+        // the CLI reports success before the task has been removed, while
+        // containerd's `always` supervisor immediately recreates it. A
+        // controlled Compose down must first disable restart, then stop.
+        let inspection = format!(
+            "{} 2>/dev/null || true",
+            nerdctl_command(&self.config, &["inspect", &cname])
+        );
+        // Fail closed if the guest/nerdctl cannot be queried at all.
+        self.ssh(&nerdctl_command(&self.config, &["ps", "-a"]), true)?;
+        let original = self.ssh(&inspection, true)?;
+        if original.trim().is_empty() {
+            return Ok(format!("{cname}: already absent"));
+        }
+        if serde_json::from_str::<serde_json::Value>(&original).is_err() {
+            return Err(HyperVError::Config(format!(
+                "Cannot parse live container inspect for {cname}; refusing removal"
+            )));
+        }
+        if container_is_running(&original) {
+            self.ssh(
+                &nerdctl_command(&self.config, &["update", "--restart=no", &cname]),
+                true,
+            )?;
+            // The pinned runtime can acknowledge stop while containerd's task
+            // still shows Running. Never issue `rm -f` in that state: it can
+            // persist nerdctl/error='cannot delete running task' and race the
+            // guest restart supervisor. Retry bounded graceful stops first.
+            let mut stopped = false;
+            for _ in 0..3 {
+                self.ssh(
+                    &nerdctl_command(&self.config, &["stop", "--time", "15", &cname]),
+                    true,
+                )?;
+                for _ in 0..20 {
+                    let current = self.ssh(&inspection, true)?;
+                    if current.trim().is_empty() {
+                        return Ok(format!("{cname}: removed during stop"));
+                    }
+                    if !container_is_running(&current) {
+                        stopped = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                if stopped {
+                    break;
+                }
+            }
+            if !stopped {
+                // Only the exact project-owned container is affected. Do not
+                // escalate to a guest/global cleanup or prune unrelated tasks.
+                self.ssh(
+                    &nerdctl_command(&self.config, &["kill", "--signal", "SIGKILL", &cname]),
+                    true,
+                )?;
+                for _ in 0..20 {
+                    let current = self.ssh(&inspection, true)?;
+                    if current.trim().is_empty() {
+                        return Ok(format!("{cname}: removed after bounded kill"));
+                    }
+                    if !container_is_running(&current) {
+                        stopped = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+            if !stopped {
+                return Err(HyperVError::Config(format!(
+                    "Container {cname} remains running after bounded stops; network preserved"
+                )));
+            }
+        }
+        let output = self.ssh(&nerdctl_command(&self.config, &["rm", "-f", &cname]), true)?;
+        // Keep the project network intact unless the exact container is gone.
+        for attempt in 0..30 {
+            let result = self.ssh(&inspection, true)?;
+            if result.trim().is_empty() {
+                return Ok(output);
+            }
+            if attempt < 29 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+        // The pinned containerd/nerdctl pair can accept `rm -f`, then leave
+        // `nerdctl/error=cannot delete running task` while its supervisor is
+        // still winding down. A later explicit stop+rm of this exact service
+        // succeeds. Retry that scoped transition, never prune other tasks.
+        for _ in 0..3 {
+            let current = self.ssh(&inspection, true)?;
+            if current.trim().is_empty() {
+                return Ok(output);
+            }
+            if serde_json::from_str::<serde_json::Value>(&current).is_err() {
+                return Err(HyperVError::Config(format!(
+                    "Container inspect invalid for {cname}; preserving its network"
+                )));
+            }
+            if container_is_running(&current) {
+                self.ssh(
+                    &nerdctl_command(&self.config, &["update", "--restart=no", &cname]),
+                    true,
+                )?;
+                self.ssh(
+                    &nerdctl_command(&self.config, &["stop", "--time", "15", &cname]),
+                    true,
+                )?;
+                for _ in 0..16 {
+                    let state = self.ssh(&inspection, true)?;
+                    if state.trim().is_empty() {
+                        return Ok(output);
+                    }
+                    if !container_is_running(&state) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+            // Stop has been requested again; re-attempt deletion of only the
+            // pinned project container. Never run a guest-wide cleanup.
+            self.ssh(&nerdctl_command(&self.config, &["rm", "-f", &cname]), true)?;
+            for _ in 0..20 {
+                let state = self.ssh(&inspection, true)?;
+                if state.trim().is_empty() {
+                    return Ok(output);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+        Err(HyperVError::Config(format!(
+            "Container removal not confirmed for {cname} after bounded scoped retries; network left intact"
+        )))
     }
 
     /// List containers.
@@ -2870,7 +3050,7 @@ if ($dnsIp) {{
         }
         let nerdctl = nerdctl_command(&self.config, &["ps", "-a"]);
         let command = format!(
-            "systemctl is-active --quiet containerd && command -v nerdctl >/dev/null 2>&1 && {nerdctl} >/dev/null && systemctl is-active --quiet buildkit && buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1"
+            "systemctl is-active --quiet containerd && command -v nerdctl >/dev/null 2>&1 && {nerdctl} >/dev/null && systemctl is-active --quiet buildkit && sudo buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1"
         );
         let mut args = self.ssh_base();
         args.push(command);
@@ -2909,7 +3089,7 @@ if ($dnsIp) {{
 
             let buildkit = self
                 .ssh(
-                    "systemctl is-active buildkit 2>/dev/null && buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1 && echo ready || echo unavailable",
+                    "systemctl is-active buildkit 2>/dev/null && sudo buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers >/dev/null 2>&1 && echo ready || echo unavailable",
                     false,
                 )
                 .unwrap_or_default();
@@ -3493,6 +3673,22 @@ fn local_bind_source(root: &Path, source: &str) -> PathBuf {
     }
 }
 
+// The pinned nerdctl `run` supports only `always` for automatic restart.
+// Its `update --help` advertises more values, but `run --restart=unless-stopped`
+// fails on the live guest. Explicit stop disables the supervisor before rm.
+// This is Compose-down acceptance, not a claim of full Docker restart parity.
+fn nerdctl_restart_policy(policy: &str, max_retries: Option<u32>) -> String {
+    match policy {
+        "always" => "always".to_string(),
+        "unless-stopped" => "always".to_string(),
+        "on-failure" => max_retries
+            .filter(|retry| *retry > 0)
+            .map(|retry| format!("on-failure:{retry}"))
+            .unwrap_or_else(|| "on-failure".to_string()),
+        _ => "no".to_string(),
+    }
+}
+
 /// Generate a nerdctl command string for SSH execution.
 pub fn nerdctl_command(cfg: &HyperVConfig, args: &[impl AsRef<str>]) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -3659,6 +3855,7 @@ fn is_tar_archive(path: &Path) -> bool {
     name.ends_with(".tar")
         || name.ends_with(".tar.gz")
         || name.ends_with(".tgz")
+        || name.ends_with(".tar.xz")
         || name.ends_with(".ova")
 }
 
@@ -3668,7 +3865,7 @@ fn archive_stem(path: &Path) -> String {
         .and_then(|v| v.to_str())
         .unwrap_or("cloud-image")
         .to_string();
-    for suffix in [".tar.gz", ".tgz", ".tar", ".ova"] {
+    for suffix in [".tar.gz", ".tar.xz", ".tgz", ".tar", ".ova"] {
         if name.to_ascii_lowercase().ends_with(suffix) {
             let keep = name.len() - suffix.len();
             name.truncate(keep);
@@ -3694,7 +3891,8 @@ fn find_disk_image(root: &Path) -> Option<PathBuf> {
                 vhd = Some(path);
             } else if (has_extension(&path, "vmdk")
                 || has_extension(&path, "qcow2")
-                || has_extension(&path, "img"))
+                || has_extension(&path, "img")
+                || has_extension(&path, "raw"))
                 && convertible.is_none()
             {
                 convertible = Some(path);
@@ -3721,6 +3919,10 @@ users:
       - {key}
 ssh_pwauth: false
 disable_root: true
+growpart:
+  mode: auto
+  devices: ['/']
+resize_rootfs: true
 package_update: true
 packages:
   - openssh-server
@@ -3736,8 +3938,6 @@ packages:
 runcmd:
   - [ sh, -c, "systemctl enable --now ssh || systemctl enable --now sshd" ]
   - [ systemctl, enable, --now, containerd ]
-  - [ growpart, /dev/sda, '1' ]
-  - [ resize2fs, /dev/sda1 ]
 final_message: "stackdeck cloud-init complete"
 "#,
         user = user,
@@ -3889,6 +4089,13 @@ mod tests {
         assert_eq!(source.matches(&preflight).count(), 3);
         assert!(guard.contains("seed.iso"));
         assert!(guard.contains("seed.vhdx"));
+        let final_guard = VM_FINAL_CREATION_SAFETY_GUARD;
+        assert!(final_guard.contains("Get-CimInstance"));
+        assert!(final_guard.contains("Get-VM -ErrorAction Stop"));
+        assert!(final_guard.contains("Test-Path -LiteralPath $disk"));
+        assert!(!final_guard.contains("seed.iso"));
+        assert!(!final_guard.contains("seed.vhdx"));
+        assert!(!final_guard.contains("Remove-VM"));
         let dangerous_converted_delete = ["Remove-Item -Force", " $out"].concat();
         let dangerous_seed_delete = ["Remove-Item -Force", " $vhd"].concat();
         let dangerous_vm_copy = ["Copy-Item -Force", " $src $disk"].concat();
@@ -4038,6 +4245,36 @@ mod tests {
     }
 
     #[test]
+    fn test_nerdctl_run_does_not_emit_docker_only_network_alias_flag() {
+        // nerdctl v2.3.5 rejects Docker's --network-alias at container run time.
+        // Service hostname and CNI network setup are tested separately on a guest.
+        let source = include_str!("lib.rs");
+        let unsupported_argument = ["\"", "--network-alias", "\".to_string()"].concat();
+        assert!(!source.contains(&unsupported_argument));
+    }
+
+    #[test]
+    fn test_buildkit_root_owned_socket_checks_use_sudo() {
+        // BuildKit's containerd-worker socket is root-owned on Debian 12.
+        // Keep bootstrap, live health, and diagnostics consistent.
+        let source = include_str!("lib.rs");
+        let command = concat!(
+            "sudo",
+            " buildctl --addr unix:///run/buildkit/buildkitd.sock debug workers"
+        );
+        assert_eq!(source.matches(command).count(), 3);
+    }
+
+    #[test]
+    fn test_cloud_init_grows_root_without_assuming_sda() {
+        let user_data = cloud_init_user_data("stackdeck", "ssh-ed25519 AAAATEST stackdeck-test");
+        assert!(user_data.contains("growpart:\n  mode: auto\n  devices: ['/']"));
+        assert!(user_data.contains("resize_rootfs: true"));
+        assert!(!user_data.contains("/dev/sda"));
+        assert!(user_data.contains("ssh_pwauth: false"));
+    }
+
+    #[test]
     fn test_parse_hyperv_config_accepts_utf8_bom_and_applies_defaults() {
         let parsed = parse_hyperv_config(
             "\u{feff}{\"vm_root\":\"D:\\\\StackDeck\\\\VMs\\\\stackdeck-linux\"}",
@@ -4054,6 +4291,19 @@ mod tests {
         assert_eq!(shell_quote("hello"), "hello");
         assert_eq!(shell_quote("hello world"), "'hello world'");
         assert_eq!(shell_quote(""), "");
+    }
+
+    #[test]
+    fn compose_restart_policy_uses_pinned_runtime_supported_value() {
+        // Pinned guest rejects --restart=unless-stopped on `nerdctl run`.
+        assert_eq!(nerdctl_restart_policy("unless-stopped", None), "always");
+        assert_eq!(nerdctl_restart_policy("always", None), "always");
+        assert_eq!(
+            nerdctl_restart_policy("on-failure", Some(4)),
+            "on-failure:4"
+        );
+        assert_eq!(nerdctl_restart_policy("on-failure", None), "on-failure");
+        assert_eq!(nerdctl_restart_policy("no", None), "no");
     }
 
     #[test]
@@ -4204,6 +4454,21 @@ mod tests {
         let ova = Path::new("jammy-server-cloudimg-amd64.ova");
         assert!(is_tar_archive(ova));
         assert_eq!(archive_stem(ova), "jammy-server-cloudimg-amd64");
+
+        // Exact official Debian Azure artifact: tar.xz wrapping disk.raw.
+        let debian = Path::new("debian-12-azure-amd64-20260806-2562.tar.xz");
+        assert!(is_tar_archive(debian));
+        assert_eq!(archive_stem(debian), "debian-12-azure-amd64-20260806-2562");
+    }
+
+    #[test]
+    fn test_debian_azure_archive_supports_only_validated_raw_member_and_growth_only() {
+        let source = include_str!("lib.rs");
+        assert!(source.contains("members != [\"disk.raw\"]"));
+        assert!(source.contains("if extract_dir.exists()"));
+        assert!(source.contains("has_extension(&path, \"raw\")"));
+        assert!(source.contains("convert -f raw -O vhdx"));
+        assert!(source.contains("if ($currentSize -lt $desiredSize)"));
     }
 
     #[test]

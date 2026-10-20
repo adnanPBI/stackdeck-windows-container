@@ -1046,6 +1046,64 @@ fn removable_hyperv_volume_names(stack: &stackdeck_types::StackConfig) -> Vec<St
     volume_names
 }
 
+fn removable_hyperv_compose_network_names(
+    project: &stackdeck_types::ComposeProject,
+    stack: &stackdeck_types::StackConfig,
+    backend: &str,
+) -> Vec<String> {
+    // Only remove networks created and owned by this Compose project.
+    // External networks must survive `compose down`, including when they are empty.
+    let used: std::collections::HashSet<&str> = stack
+        .services
+        .values()
+        .filter(|svc| effective_backend(backend, &svc.backend) == "hyperv")
+        .flat_map(|svc| svc.networks.iter().map(String::as_str))
+        .collect();
+    let mut removable: Vec<String> = project
+        .networks
+        .values()
+        .filter(|network| !network.external && used.contains(network.name.as_str()))
+        .map(|network| network.name.clone())
+        .collect();
+    removable.sort();
+    removable.dedup();
+    removable
+}
+
+// `nerdctl network ls` exposes a NAME column. Match exact tokens rather
+// than substrings to avoid deleting a similarly prefixed user network.
+fn present_nerdctl_network_names(output: &str) -> std::collections::HashSet<String> {
+    output
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let columns: Vec<&str> = line.split_whitespace().collect();
+            if columns.len() >= 2 && columns[0] != "NETWORK" {
+                Some(columns[1].to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn pending_project_container_cleanup(
+    names: &[String],
+    states: &HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| {
+            states
+                .get(name.as_str())
+                .and_then(|state| state.get("exists"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
 fn stack_service_to_hyperv(
     stack: &stackdeck_types::StackConfig,
     svc: &stackdeck_types::ServiceConfig,
@@ -2472,7 +2530,101 @@ fn cmd_compose_down(
     } else {
         services.to_vec()
     };
-    run_stack_down(stack, backend, &targets, volumes)
+    // Only full-project down may delete a network. Re-parse the Compose
+    // resources to preserve the explicit external ownership bit, which is
+    // deliberately not flattened into StackConfig's service network names.
+    let owned_networks = if services.is_empty() {
+        let project =
+            stackdeck_compose::load_compose_file(&PathBuf::from(file), None, profiles, None, None)?;
+        removable_hyperv_compose_network_names(&project, &stack, backend)
+    } else {
+        Vec::new()
+    };
+    let project_containers: Vec<String> = if !owned_networks.is_empty() {
+        targets
+            .iter()
+            .filter_map(|name| {
+                stack
+                    .services
+                    .get(name)
+                    .filter(|service| effective_backend(backend, &service.backend) == "hyperv")
+            })
+            .map(|service| stackdeck_hyperv::container_name(&stack.project, &service.name))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    run_stack_down(stack, backend, &targets, volumes)?;
+    if !owned_networks.is_empty() {
+        let manager =
+            stackdeck_hyperv::HyperVManager::new(stackdeck_hyperv::HyperVManager::load_config()?);
+        // nerdctl rm -f can report success before its background cleanup
+        // detaches endpoints. Check only this project's container names.
+        let mut remaining = project_containers.clone();
+        for attempt in 0..30 {
+            let refs: Vec<&str> = remaining.iter().map(String::as_str).collect();
+            let inspected = manager.inspect_containers(&refs)?;
+            remaining = pending_project_container_cleanup(&remaining, &inspected);
+            if remaining.is_empty() {
+                break;
+            }
+            if attempt < 29 {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+        if !remaining.is_empty() {
+            anyhow::bail!(
+                "Container cleanup has not finished; refusing network removal: {}",
+                remaining.join(", ")
+            );
+        }
+        let initial_inventory = present_nerdctl_network_names(&manager.network_list()?);
+        let present_owned: Vec<String> = owned_networks
+            .iter()
+            .filter(|name| initial_inventory.contains(name.as_str()))
+            .cloned()
+            .collect();
+        if present_owned.is_empty() {
+            println!("Owned project networks are already absent");
+            return Ok(());
+        }
+        let names: Vec<&str> = present_owned.iter().map(String::as_str).collect();
+        let mut removed = false;
+        let mut last_error = String::new();
+        for attempt in 0..8 {
+            match manager.network_remove(&names) {
+                Ok(_) => {
+                    removed = true;
+                    break;
+                }
+                Err(err) => {
+                    last_error = err.to_string();
+                    // Another process may have removed the exact owned network
+                    // between list and rm. Treat proven absence as idempotent.
+                    let currently_present = present_nerdctl_network_names(&manager.network_list()?);
+                    if present_owned
+                        .iter()
+                        .all(|name| !currently_present.contains(name))
+                    {
+                        removed = true;
+                        break;
+                    }
+                    if attempt < 7 {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                    }
+                }
+            }
+        }
+        if !removed {
+            anyhow::bail!("Owned network cleanup did not finish: {}", last_error);
+        }
+        let after = present_nerdctl_network_names(&manager.network_list()?);
+        if present_owned.iter().any(|name| after.contains(name)) {
+            anyhow::bail!("Owned network still present after cleanup; refusing success");
+        }
+        println!("Removed project networks: {}", present_owned.join(", "));
+    }
+    Ok(())
 }
 
 fn cmd_compose_status(
@@ -2921,6 +3073,61 @@ services:
         let stack = load_compose_stack(&file, "hyperv", &active_profiles).unwrap();
 
         assert!(stack.services.contains_key("debug"));
+    }
+
+    #[test]
+    fn compose_down_network_inventory_matches_only_exact_owned_names() {
+        let output = "NETWORK ID      NAME                  FILE\n17f29b073143    bridge  /etc/cni/net.d/bridge\n3180e43ce48c    smoke_default   /etc/cni/net.d/smoke\n981346afa56a    smoke_default_other /etc/cni/net.d/other\n                host\n                none\n";
+        let names = present_nerdctl_network_names(output);
+        assert!(names.contains("smoke_default"));
+        assert!(names.contains("smoke_default_other"));
+        assert!(!names.contains("smoke"));
+        assert!(!names.contains("host"));
+        assert!(!names.contains("none"));
+        assert!(present_nerdctl_network_names("NETWORK ID NAME FILE\n").is_empty());
+    }
+
+    #[test]
+    fn compose_down_waits_for_pending_container_teardown_before_network_removal() {
+        let names = vec!["stackdeck-demo-web".to_string()];
+        let mut states = HashMap::new();
+        assert_eq!(pending_project_container_cleanup(&names, &states), names);
+        states.insert(
+            names[0].clone(),
+            serde_json::json!({"exists": true, "running": false}),
+        );
+        assert_eq!(pending_project_container_cleanup(&names, &states), names);
+        states.insert(names[0].clone(), serde_json::json!({"exists": false}));
+        assert!(pending_project_container_cleanup(&names, &states).is_empty());
+    }
+
+    #[test]
+    fn compose_down_removes_owned_networks_not_external_or_unused_networks() {
+        let file = write_compose(
+            "network-cleanup",
+            r#"
+name: demo
+services:
+  web:
+    image: nginx
+    networks:
+      - default
+      - shared
+networks:
+  shared:
+    external: true
+    name: corp_shared
+  unused:
+    name: demo_unused
+"#,
+        );
+        let project =
+            stackdeck_compose::load_compose_file(&PathBuf::from(&file), None, &[], None, None)
+                .unwrap();
+        let stack = load_compose_stack(&file, "hyperv", &[]).unwrap();
+        let managed = removable_hyperv_compose_network_names(&project, &stack, "hyperv");
+        assert_eq!(managed, vec!["demo_default"]);
+        assert!(removable_hyperv_compose_network_names(&project, &stack, "native").is_empty());
     }
 
     #[test]

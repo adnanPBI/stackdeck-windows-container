@@ -12,7 +12,7 @@ Windows 11 Pro, Enterprise or Education x86-64, with working Hyper-V, Default Sw
 4. Build the two binaries using `cargo build -p stackdeck-cli --bin stackdeck-cli --release --locked` and the equivalent command for `stackdeck-hive`.
 5. From `desktop/stackdeck`, run `npm ci`, `npm audit --audit-level=moderate`, and `npm run build`.
 6. Prepare unsigned local test installers with `scripts/windows/15-Build-Local-Go-Package.ps1`. Never publish them as signed production media.
-7. Verify the extracted MSI and NSIS payload hashes using `scripts/windows/10-Verify-Installer-Payloads.ps1 -ExpectedPayloadManifest <manifest> -SkipSignature`. The signature bypass is only for local testing.
+7. Verify the extracted MSI and NSIS payload hashes using `scripts/windows/10-Verify-Installer-Payloads.ps1 -ExpectedPayloadManifest <manifest> -SkipSignature`. The signature bypass is permitted for local functional testing and the separately labeled, hash-verified **unsigned preview workflow** only; it never constitutes production signature acceptance.
 8. Export a committed source handover with `scripts/windows/14-Package-Source-Handover.ps1 -OutputZip <path>` after all intended files are committed.
 
 ## Independent clean-client qualification (Administrator)
@@ -33,10 +33,32 @@ The `.github/workflows/release-windows.yml` workflow can publish only from a rel
 
 Configure protected GitHub Environment `windows-release` and require human approval. Provide the following protected variables: `WINDOWS_RUNTIME_IMAGE_URL`, `WINDOWS_RUNTIME_IMAGE_SHA512`, `WINDOWS_DEBIAN_SNAPSHOT_TIMESTAMP`, `WINDOWS_NERDCTL_VERSION`, `WINDOWS_NERDCTL_SHA256_AMD64`, `WINDOWS_QUALIFIED_SOURCE_COMMIT`, and `WINDOWS_QUALIFICATION_EVIDENCE_SHA256`. The qualified commit must equal the exact tagged source commit, and the evidence digest must match the separately archived clean-client qualification report.
 
-Configure code-signing secrets: `WINDOWS_SIGNING_CERT_PFX_B64`, `WINDOWS_SIGNING_CERT_PASSWORD`, and `WINDOWS_SIGNING_CERT_THUMBPRINT`. Use a currently valid publicly trusted code-signing identity that authorizes the publisher; self-signed developer certificates cannot qualify a public release. Keep the PFX and password out of source and logs.
+Use the **DigiCert KeyLocker** workflow in `docs/DIGICERT_KEYLOCKER_SIGNING.md`. Required protected secrets are `SM_API_KEY`, `SM_CLIENT_CERT_FILE_B64`, `SM_CLIENT_CERT_PASSWORD` and `WINDOWS_SIGNING_CERT_THUMBPRINT`; protected variables are `SM_HOST` and `WINDOWS_SIGNING_KEYPAIR_ALIAS`, in addition to the runtime/qualification variables above. The client-auth P12 is **not** the exportable signing private key. The publisher must enroll a publicly trusted, HSM-backed signing certificate, independently prove trust and remote-key custody, and verify a real timestamped Authenticode signing challenge. Never substitute the local self-signed developer certificate or print credentials to CI logs.
 
 The signed workflow runs locked tests, signs CLI/hive and desktop payloads *before* MSI/NSIS bundling, signs installers, extracts and verifies exact embedded hashes and Authenticode signatures, creates checksums and provenance, requests GitHub artifact attestation, and publishes exactly seven verified release assets. A manual workflow dispatch creates CI artifacts but does not create a public GitHub release.
 
+## Distinct UNSIGNED evaluation preview (not production GO)
+
+For research and technically experienced testers only, a Git tag named `preview-v0.6.0-` plus the first 12 characters of the exact commit can trigger `.github/workflows/preview-windows.yml`. The workflow rebuilds Windows MSI/NSIS binaries from the tag, runs the locked Rust and packaging/payload tests, creates checksums and provenance, and publishes a **GitHub pre-release** explicitly identifying its assets as unsigned and experimental. It never publishes from a stable `v*` tag and never substitutes for the trusted signing workflow. Review `docs/UNSIGNED_PREVIEW_RELEASE.md` before distributing or recommending it. Do not bypass SmartScreen, Smart App Control or organizational policy; use a dedicated backed-up Windows 11 test host without valuable VMs. Release notes must disclose the missing independent fresh-profile and host-restart gates and any known installation compatibility gaps.
+
+The presence of a GitHub pre-release is not a completed functional or security qualification. A source commit, artifact hash and automated test report are evidence of build provenance/integrity, not publisher identity or third-party trust. Do not market an unsigned preview as stable or suitable for production environments.
+
+### Published unsigned evaluation checkpoint — 2026-10-20
+
+The exact tag [`preview-v0.6.0-c9607be36cc9`](https://github.com/adnanPBI/stackdeck-windows-container/releases/tag/preview-v0.6.0-c9607be36cc9) published an **unsigned prerelease** after clean Windows [Actions run 39409784504](https://github.com/adnanPBI/stackdeck-windows-container/actions/runs/39409784504) completed success: locked Rust/source checks, independent MSI+NSIS builds, migration guard and support-log redaction tests, and embedded payload SHA-256 inspection. The RND installed Hive separately passed two original smoke cycles; the candidate passed three cycles. [Public-safe acceptance matrix and evidence digests](docs/STACKDECK_V060_PUBLIC_QUALIFICATION_20261020.md) detail the completed checks and limitations. **No stable `v0.6.0` release, trusted signing, real host restart or independent fresh-machine installer acceptance is implied.**
+
+## RND functional qualification update — 2026-10-19
+
+On the exact approved existing `stackdeck-linux` VM, authenticated registry image pull/inspect/delete, installed-image/named-volume/bridge-network lifecycle (including data persistence through container recreation), an actual BuildKit Dockerfile build and HTTP 200, and the supported Docker REST API subset passed. The protected S4U startup task plus job-object child supervision passed a controlled stop/start test with exact API port release, bearer HTTP 200 and unauthorized HTTP 401. A distinct postboot verifier was armed and its current-boot negative test correctly refused to claim a real reboot. See `docs/RND_CONTAINER_AND_HOST_RESTART_ACCEPTANCE_20261019.md`.
+
+**Still NO-GO for production:** RND had open Excel/browser processes and an interactive console; an actual host restart was not performed, so the full reboot, DHCP portproxy and workload HTTP recovery gates are pending. RND-specific scripts are not a generic supported installer for an independent clean Windows machine. The signed stable release, clean-client matrix and release approvals are unaffected and remain blocked.
+
+## 2026-10-20 installed smoke cleanup correction
+
+The operator-reported Nginx HTTP 200 followed by failed Compose cleanup was reproduced. The corrected, installed Hive at SHA-256 `4625a697498362fc6cf51e137988cea722304dbe2cf5f79daccef9bad051fc3c` passed two consecutive invocations of the **exact installed** `04-Smoke-Test.ps1` command: healthy Nginx, host HTTP 200, project container and network absent afterward, unrelated Docker API network preserved. The release-candidate binary also passed three live Compose cycles; the complete locked Rust workspace passed **124 tests, 0 failed**. Backup-and-rollback evidence is recorded separately. See `docs/RND_CONTAINER_AND_HOST_RESTART_ACCEPTANCE_20261019.md`.
+
+This is **RND local runtime acceptance only**; it does **not** qualify reboot recovery, independent MSI/NSIS upgrade/clean-profile behavior, `unless-stopped` parity across all guest runtime versions, trusted Authenticode signing, or stable production publication.
+
 ## NO-GO conditions
 
-Do not create/push the final `v0.6.0` tag or publish a public release if the machine-side Hyper-V tests, clean-client installation matrix, trustworthy certificate, release evidence SHA-256, or protected GitHub settings have not been independently verified. A local source candidate tag is not a production release.
+Do not create/push the final **stable** `v0.6.0` tag or publish a production release if the machine-side Hyper-V tests, clean-client installation matrix, trustworthy certificate, release evidence SHA-256, or protected GitHub settings have not been independently verified. A preview tag is not a production release.
