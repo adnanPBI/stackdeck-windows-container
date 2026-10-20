@@ -25,6 +25,17 @@ if(!$makensisPath -or !(Test-Path -LiteralPath $makensisPath -PathType Leaf)){
 # Get-Item returns FileInfo (.FullName). Use a validated path in both cases.
 $key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\com.stackdeck.desktop'
 if(Test-Path -LiteralPath $key){throw 'Real historical registration exists; test cannot replace it'}
+# A fresh hosted Windows runner can have an incomplete HKCU\Software tree.
+# Create only absent ancestors of the synthetic test registration; never
+# overwrite the real StackDeck uninstall key or another application's key.
+$registryParents=@(
+ 'HKCU:\Software',
+ 'HKCU:\Software\Microsoft',
+ 'HKCU:\Software\Microsoft\Windows',
+ 'HKCU:\Software\Microsoft\Windows\CurrentVersion',
+ 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+)
+$createdRegistryParents=New-Object 'System.Collections.Generic.List[string]'
 $folder=Join-Path ([IO.Path]::GetTempPath()) ('StackDeck-NSIS-GuardQA-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $folder -ErrorAction Stop|Out-Null
 $nsi=Join-Path $folder 'test-legacy-guard.nsi'
@@ -40,6 +51,8 @@ $record=[ordered]@{
  original_registry_preserved=$false
  touched_vm=$false
  touched_installed_stackdeck=$false
+ registry_parent_keys_created=0
+ stage='preflight'
  compile_exit=-1;blocked_exit=-1;clean_exit=-1;passed=$false;error=''
 }
 $snippet=@'
@@ -69,21 +82,33 @@ function RunHarness {
  return [int]$p.ExitCode
 }
 try{
+ $record.stage='compile hook'
  & $makensisPath /V2 $nsi |Out-Null
  $record.compile_exit=$LASTEXITCODE
  if($record.compile_exit -ne 0 -or !(Test-Path $exe)){throw 'Guard harness cannot compile'}
+ $record.stage='ensure missing HKCU parents'
+ foreach($parent in $registryParents){
+  if(!(Test-Path -LiteralPath $parent)){
+   $null=New-Item -Path $parent -ErrorAction Stop
+   $createdRegistryParents.Add($parent)
+  }
+ }
+ $record.registry_parent_keys_created=$createdRegistryParents.Count
+ $record.stage='synthetic legacy registration'
  $null=New-Item -Path $key -ErrorAction Stop
  $null=New-ItemProperty -LiteralPath $key -Name StackDeckGuardQAMarker -Value $token -PropertyType String
  $null=New-ItemProperty -LiteralPath $key -Name DisplayName -Value 'StackDeck' -PropertyType String
  $record.registered_fake_current_user_install=$true
+ $record.stage='deny synthetic legacy NSIS install'
  $record.blocked_exit=RunHarness $exe
  $record.simulated_legacy_rejected=($record.blocked_exit -ne 0 -and !(Test-Path $marker))
  $saved=Get-ItemProperty -LiteralPath $key -ErrorAction Stop
  if($saved.StackDeckGuardQAMarker -ne $token){throw 'QA marker changed; leave registry key for review'}
  Remove-Item -LiteralPath $key -ErrorAction Stop
+ $record.stage='allow clean NSIS install'
  $record.clean_exit=RunHarness $exe
  $record.clean_current_user_allowed=($record.clean_exit -eq 0 -and (Test-Path $marker))
-}catch{$record.error=$_.Exception.ToString()}
+}catch{$record.error=('STAGE='+$record.stage+' '+$_.Exception.ToString()+' '+$_.ScriptStackTrace)}
 finally{
  try{
   if(Test-Path -LiteralPath $key){
@@ -91,6 +116,16 @@ finally{
    if($check.StackDeckGuardQAMarker -eq $token){
     Remove-Item -LiteralPath $key -ErrorAction Stop
    }else{throw 'Unexpected registry change, refusing delete'}
+  }
+  # Only delete ancestors created by this QA if still entirely empty.
+  # Never remove pre-existing Registry keys or new data added by another app.
+  foreach($parent in @($createdRegistryParents.ToArray() | Sort-Object { $_.Length } -Descending)){
+   if(Test-Path -LiteralPath $parent){
+    $registryKey=Get-Item -LiteralPath $parent -ErrorAction Stop
+    if($registryKey.GetSubKeyNames().Count -eq 0 -and $registryKey.GetValueNames().Count -eq 0){
+     Remove-Item -LiteralPath $parent -ErrorAction Stop
+    }
+   }
   }
   $record.original_registry_preserved=!(Test-Path $key)
  }catch{$record.error+=(' CLEANUP='+$_.Exception.Message)}
