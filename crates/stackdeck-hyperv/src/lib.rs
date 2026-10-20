@@ -2081,16 +2081,11 @@ if ($dnsIp) {{
             network,
         ];
 
-        let restart = if svc.restart == "always" || svc.restart == "unless-stopped" {
-            "always".to_string()
-        } else if svc.restart == "on-failure" {
-            svc.restart_max_retries
-                .filter(|retries| *retries > 0)
-                .map(|retries| format!("on-failure:{retries}"))
-                .unwrap_or_else(|| "on-failure".to_string())
-        } else {
-            "no".to_string()
-        };
+        // The pinned nerdctl 2.3.5 `run` command only accepts `always` for
+        // auto-restart (even though its `update --help` lists unless-stopped).
+        // Emulate controlled Compose down by explicitly disabling auto-restart
+        // in stop_service before stopping/removing the container.
+        let restart = nerdctl_restart_policy(&svc.restart, svc.restart_max_retries);
         args.extend(["--restart".to_string(), restart]);
         args.extend([
             "--label".to_string(),
@@ -2522,7 +2517,139 @@ if ($dnsIp) {{
         }
 
         let cname = container_name(&svc.project, &svc.name);
-        self.ssh(&nerdctl_command(&self.config, &["rm", "-f", &cname]), true)
+        // A container with a restart supervisor can race `nerdctl rm -f`:
+        // the CLI reports success before the task has been removed, while
+        // containerd's `always` supervisor immediately recreates it. A
+        // controlled Compose down must first disable restart, then stop.
+        let inspection = format!(
+            "{} 2>/dev/null || true",
+            nerdctl_command(&self.config, &["inspect", &cname])
+        );
+        // Fail closed if the guest/nerdctl cannot be queried at all.
+        self.ssh(&nerdctl_command(&self.config, &["ps", "-a"]), true)?;
+        let original = self.ssh(&inspection, true)?;
+        if original.trim().is_empty() {
+            return Ok(format!("{cname}: already absent"));
+        }
+        if serde_json::from_str::<serde_json::Value>(&original).is_err() {
+            return Err(HyperVError::Config(format!(
+                "Cannot parse live container inspect for {cname}; refusing removal"
+            )));
+        }
+        if container_is_running(&original) {
+            self.ssh(
+                &nerdctl_command(&self.config, &["update", "--restart=no", &cname]),
+                true,
+            )?;
+            // The pinned runtime can acknowledge stop while containerd's task
+            // still shows Running. Never issue `rm -f` in that state: it can
+            // persist nerdctl/error='cannot delete running task' and race the
+            // guest restart supervisor. Retry bounded graceful stops first.
+            let mut stopped = false;
+            for _ in 0..3 {
+                self.ssh(
+                    &nerdctl_command(&self.config, &["stop", "--time", "15", &cname]),
+                    true,
+                )?;
+                for _ in 0..20 {
+                    let current = self.ssh(&inspection, true)?;
+                    if current.trim().is_empty() {
+                        return Ok(format!("{cname}: removed during stop"));
+                    }
+                    if !container_is_running(&current) {
+                        stopped = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                if stopped {
+                    break;
+                }
+            }
+            if !stopped {
+                // Only the exact project-owned container is affected. Do not
+                // escalate to a guest/global cleanup or prune unrelated tasks.
+                self.ssh(
+                    &nerdctl_command(&self.config, &["kill", "--signal", "SIGKILL", &cname]),
+                    true,
+                )?;
+                for _ in 0..20 {
+                    let current = self.ssh(&inspection, true)?;
+                    if current.trim().is_empty() {
+                        return Ok(format!("{cname}: removed after bounded kill"));
+                    }
+                    if !container_is_running(&current) {
+                        stopped = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+            if !stopped {
+                return Err(HyperVError::Config(format!(
+                    "Container {cname} remains running after bounded stops; network preserved"
+                )));
+            }
+        }
+        let output = self.ssh(&nerdctl_command(&self.config, &["rm", "-f", &cname]), true)?;
+        // Keep the project network intact unless the exact container is gone.
+        for attempt in 0..30 {
+            let result = self.ssh(&inspection, true)?;
+            if result.trim().is_empty() {
+                return Ok(output);
+            }
+            if attempt < 29 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+        // The pinned containerd/nerdctl pair can accept `rm -f`, then leave
+        // `nerdctl/error=cannot delete running task` while its supervisor is
+        // still winding down. A later explicit stop+rm of this exact service
+        // succeeds. Retry that scoped transition, never prune other tasks.
+        for _ in 0..3 {
+            let current = self.ssh(&inspection, true)?;
+            if current.trim().is_empty() {
+                return Ok(output);
+            }
+            if serde_json::from_str::<serde_json::Value>(&current).is_err() {
+                return Err(HyperVError::Config(format!(
+                    "Container inspect invalid for {cname}; preserving its network"
+                )));
+            }
+            if container_is_running(&current) {
+                self.ssh(
+                    &nerdctl_command(&self.config, &["update", "--restart=no", &cname]),
+                    true,
+                )?;
+                self.ssh(
+                    &nerdctl_command(&self.config, &["stop", "--time", "15", &cname]),
+                    true,
+                )?;
+                for _ in 0..16 {
+                    let state = self.ssh(&inspection, true)?;
+                    if state.trim().is_empty() {
+                        return Ok(output);
+                    }
+                    if !container_is_running(&state) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+            // Stop has been requested again; re-attempt deletion of only the
+            // pinned project container. Never run a guest-wide cleanup.
+            self.ssh(&nerdctl_command(&self.config, &["rm", "-f", &cname]), true)?;
+            for _ in 0..20 {
+                let state = self.ssh(&inspection, true)?;
+                if state.trim().is_empty() {
+                    return Ok(output);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+        Err(HyperVError::Config(format!(
+            "Container removal not confirmed for {cname} after bounded scoped retries; network left intact"
+        )))
     }
 
     /// List containers.
@@ -3546,6 +3673,22 @@ fn local_bind_source(root: &Path, source: &str) -> PathBuf {
     }
 }
 
+// The pinned nerdctl `run` supports only `always` for automatic restart.
+// Its `update --help` advertises more values, but `run --restart=unless-stopped`
+// fails on the live guest. Explicit stop disables the supervisor before rm.
+// This is Compose-down acceptance, not a claim of full Docker restart parity.
+fn nerdctl_restart_policy(policy: &str, max_retries: Option<u32>) -> String {
+    match policy {
+        "always" => "always".to_string(),
+        "unless-stopped" => "always".to_string(),
+        "on-failure" => max_retries
+            .filter(|retry| *retry > 0)
+            .map(|retry| format!("on-failure:{retry}"))
+            .unwrap_or_else(|| "on-failure".to_string()),
+        _ => "no".to_string(),
+    }
+}
+
 /// Generate a nerdctl command string for SSH execution.
 pub fn nerdctl_command(cfg: &HyperVConfig, args: &[impl AsRef<str>]) -> String {
     let mut parts: Vec<String> = Vec::new();
@@ -4148,6 +4291,19 @@ mod tests {
         assert_eq!(shell_quote("hello"), "hello");
         assert_eq!(shell_quote("hello world"), "'hello world'");
         assert_eq!(shell_quote(""), "");
+    }
+
+    #[test]
+    fn compose_restart_policy_uses_pinned_runtime_supported_value() {
+        // Pinned guest rejects --restart=unless-stopped on `nerdctl run`.
+        assert_eq!(nerdctl_restart_policy("unless-stopped", None), "always");
+        assert_eq!(nerdctl_restart_policy("always", None), "always");
+        assert_eq!(
+            nerdctl_restart_policy("on-failure", Some(4)),
+            "on-failure:4"
+        );
+        assert_eq!(nerdctl_restart_policy("on-failure", None), "on-failure");
+        assert_eq!(nerdctl_restart_policy("no", None), "no");
     }
 
     #[test]

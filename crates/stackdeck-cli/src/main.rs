@@ -1070,6 +1070,23 @@ fn removable_hyperv_compose_network_names(
     removable
 }
 
+// `nerdctl network ls` exposes a NAME column. Match exact tokens rather
+// than substrings to avoid deleting a similarly prefixed user network.
+fn present_nerdctl_network_names(output: &str) -> std::collections::HashSet<String> {
+    output
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let columns: Vec<&str> = line.split_whitespace().collect();
+            if columns.len() >= 2 && columns[0] != "NETWORK" {
+                Some(columns[1].to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 fn pending_project_container_cleanup(
     names: &[String],
     states: &HashMap<String, serde_json::Value>,
@@ -2561,7 +2578,17 @@ fn cmd_compose_down(
                 remaining.join(", ")
             );
         }
-        let names: Vec<&str> = owned_networks.iter().map(String::as_str).collect();
+        let initial_inventory = present_nerdctl_network_names(&manager.network_list()?);
+        let present_owned: Vec<String> = owned_networks
+            .iter()
+            .filter(|name| initial_inventory.contains(name.as_str()))
+            .cloned()
+            .collect();
+        if present_owned.is_empty() {
+            println!("Owned project networks are already absent");
+            return Ok(());
+        }
+        let names: Vec<&str> = present_owned.iter().map(String::as_str).collect();
         let mut removed = false;
         let mut last_error = String::new();
         for attempt in 0..8 {
@@ -2572,6 +2599,16 @@ fn cmd_compose_down(
                 }
                 Err(err) => {
                     last_error = err.to_string();
+                    // Another process may have removed the exact owned network
+                    // between list and rm. Treat proven absence as idempotent.
+                    let currently_present = present_nerdctl_network_names(&manager.network_list()?);
+                    if present_owned
+                        .iter()
+                        .all(|name| !currently_present.contains(name))
+                    {
+                        removed = true;
+                        break;
+                    }
                     if attempt < 7 {
                         std::thread::sleep(std::time::Duration::from_secs(2));
                     }
@@ -2581,7 +2618,11 @@ fn cmd_compose_down(
         if !removed {
             anyhow::bail!("Owned network cleanup did not finish: {}", last_error);
         }
-        println!("Removed project networks: {}", owned_networks.join(", "));
+        let after = present_nerdctl_network_names(&manager.network_list()?);
+        if present_owned.iter().any(|name| after.contains(name)) {
+            anyhow::bail!("Owned network still present after cleanup; refusing success");
+        }
+        println!("Removed project networks: {}", present_owned.join(", "));
     }
     Ok(())
 }
@@ -3032,6 +3073,18 @@ services:
         let stack = load_compose_stack(&file, "hyperv", &active_profiles).unwrap();
 
         assert!(stack.services.contains_key("debug"));
+    }
+
+    #[test]
+    fn compose_down_network_inventory_matches_only_exact_owned_names() {
+        let output = "NETWORK ID      NAME                  FILE\n17f29b073143    bridge  /etc/cni/net.d/bridge\n3180e43ce48c    smoke_default   /etc/cni/net.d/smoke\n981346afa56a    smoke_default_other /etc/cni/net.d/other\n                host\n                none\n";
+        let names = present_nerdctl_network_names(output);
+        assert!(names.contains("smoke_default"));
+        assert!(names.contains("smoke_default_other"));
+        assert!(!names.contains("smoke"));
+        assert!(!names.contains("host"));
+        assert!(!names.contains("none"));
+        assert!(present_nerdctl_network_names("NETWORK ID NAME FILE\n").is_empty());
     }
 
     #[test]

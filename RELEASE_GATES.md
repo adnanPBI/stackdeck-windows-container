@@ -49,6 +49,12 @@ On the exact approved existing `stackdeck-linux` VM, authenticated registry imag
 
 **Still NO-GO for production:** RND had open Excel/browser processes and an interactive console; an actual host restart was not performed, so the full reboot, DHCP portproxy and workload HTTP recovery gates are pending. RND-specific scripts are not a generic supported installer for an independent clean Windows machine. The signed stable release, clean-client matrix and release approvals are unaffected and remain blocked.
 
+## 2026-10-20 installed smoke cleanup correction
+
+The operator-reported Nginx HTTP 200 followed by failed Compose cleanup was reproduced. The corrected, installed Hive at SHA-256 `4625a697498362fc6cf51e137988cea722304dbe2cf5f79daccef9bad051fc3c` passed two consecutive invocations of the **exact installed** `04-Smoke-Test.ps1` command: healthy Nginx, host HTTP 200, project container and network absent afterward, unrelated Docker API network preserved. The release-candidate binary also passed three live Compose cycles; the complete locked Rust workspace passed **124 tests, 0 failed**. Backup-and-rollback evidence is recorded separately. See `docs/RND_CONTAINER_AND_HOST_RESTART_ACCEPTANCE_20261019.md`.
+
+This is **RND local runtime acceptance only**; it does **not** qualify reboot recovery, independent MSI/NSIS upgrade/clean-profile behavior, `unless-stopped` parity across all guest runtime versions, trusted Authenticode signing, or stable production publication.
+
 ## NO-GO conditions
 
 Do not create/push the final **stable** `v0.6.0` tag or publish a production release if the machine-side Hyper-V tests, clean-client installation matrix, trustworthy certificate, release evidence SHA-256, or protected GitHub settings have not been independently verified. A preview tag is not a production release.

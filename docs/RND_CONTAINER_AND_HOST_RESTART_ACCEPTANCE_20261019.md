@@ -39,6 +39,16 @@ Task: `StackDeck-v060-Unattended-DockerAPI`
 
 The first attempted SYSTEM task failed because Windows OpenSSH rejected the user-owned private SSH key. No private SSH key was copied or re-owned: the S4U task retains the original authorized identity. This distinction is essential for support and security reviews.
 
+## 2026-10-20 installed Hive Compose teardown regression
+
+The operator-reported `scripts/windows/04-Smoke-Test.ps1` previously returned HTTP 200 but failed on `Container cleanup has not finished; refusing network removal`. Guest forensics proved `nerdctl/error=cannot delete running task ... failed precondition` with a restart supervisor still showing a running task despite an acknowledged remove. A first simple restart-policy translation to `unless-stopped` failed because the pinned nerdctl 2.3.5 accepts `always` but rejects `unless-stopped` during `run`. The remedy therefore uses the supported creation policy, disables restart before down, verifies stopped/absent state, retries only the named StackDeck container, and checks that a Compose-owned network is really present before removing it. No other container, image, VM, disk or external network is pruned.
+
+- Full locked Rust workspace: **124 passed, 0 failed** after the final source corrections.
+- Candidate Hive SHA-256: `4625a697498362fc6cf51e137988cea722304dbe2cf5f79daccef9bad051fc3c`; **three** real Compose up/healthy/HTTP 200/down/absence cycles passed, plus the previously stuck container was removed. Evidence: `target/release-evidence/20261020-candidate-compose-cleanup-live-v7.json`.
+- RND installed candidate hotfix was hash-bound, backed up the previous installed Hive and S4U seal, restarted the protected API service, and passed bearer 200 / no-token 401 / guest health checks. Evidence: `target/release-evidence/20261020-qualified-installed-hive-cutover-v2.json`. This was **code-only local qualification**, not a fresh MSI/NSIS install or trusted signature test.
+- **The user's exact installed smoke command was run twice successfully**. Both runs returned HTTP 200, deleted the test container and owned network, and preserved the unrelated API network and approved VM. Evidence: `target/release-evidence/20261020-installed-smoke-regression-v2.json`.
+- Limitations: the guest does not natively implement full Docker `unless-stopped` semantics; safe Compose-down handling is qualified. Fail-closed network deletion is intentional if a task cannot be proven absent. This RND result is not independent clean-machine certification.
+
 ## Actual host-restart acceptance gate
 
 The RND console was **actively used**, with open Excel and browser processes, when the verifier was armed. The remote desktop agent had no independently verified service auto-start/reconnection configuration. Therefore **Windows was not restarted**; unsaved user documents and remote access were not put at risk.
