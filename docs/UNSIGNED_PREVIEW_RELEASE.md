@@ -26,11 +26,23 @@ compatibility.
 
 ## Proven evaluation and remaining limitations
 
-On the authorized RND Windows 11 host, the source candidate passed 121 locked
-Rust tests, frontend/desktop build, MSI and NSIS packaging, and independent
-embedded-payload hash verification. The earlier installed runtime completed
-SSH, containerd, BuildKit, Compose, Windows HTTP 200 and teardown tests. The
-candidate Hive is byte-identical to that installed runtime.
+On the authorized RND Windows 11 host, the corrected source passed 124 locked
+Rust workspace tests (0 failed), frontend/desktop build, MSI and NSIS
+packaging, and independent embedded-payload hash verification. The rebuilt
+Hive was installed locally with a verified rollback backup and passed two
+complete executions of `04-Smoke-Test.ps1`: authenticated guest SSH,
+containerd, BuildKit, healthy Nginx with Windows HTTP 200, then confirmed
+removal of the project container and its owned network. The candidate had
+also passed three live Compose cycles and preserved the approved VM, unrelated
+Docker API network and original VM backups. These are RND-only acceptance
+results, **not** independent fresh-PC acceptance.
+
+The pinned nerdctl 2.3.5 guest does not fully implement Docker's
+`unless-stopped` creation semantics. StackDeck's guarded Compose shutdown
+prevents resurrection during explicit teardown, but full restart-policy parity
+should not be inferred. An actual unattended **Windows host reboot** has not
+been qualified, and the RND machine had open interactive user work; the host
+was not restarted without a safe maintenance window.
 
 The following have **NOT** been independently certified on a separate fresh
 Windows 11 machine: historical per-user NSIS v0.5.0 migration,

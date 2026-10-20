@@ -13,11 +13,16 @@ $sha=(git -C $repo rev-parse HEAD |Out-String).Trim()
 $hook=Join-Path $repo 'desktop\stackdeck\src-tauri\windows\hooks.nsh'
 if(!(Test-Path $hook -PathType Leaf)){throw 'Legacy guard source missing'}
 $makensis=Get-Command makensis.exe -CommandType Application -ErrorAction SilentlyContinue|Select-Object -First 1
-if(!$makensis){
+$makensisPath = if($makensis){ [string]$makensis.Source }else{ '' }
+if(!$makensisPath){
  $p=Join-Path $env:LOCALAPPDATA 'tauri\NSIS\makensis.exe'
- if(Test-Path $p -PathType Leaf){$makensis=Get-Item $p}
+ if(Test-Path -LiteralPath $p -PathType Leaf){$makensisPath=$p}
 }
-if(!$makensis){throw 'NSIS compiler unavailable; build the bundle before running this test'}
+if(!$makensisPath -or !(Test-Path -LiteralPath $makensisPath -PathType Leaf)){
+ throw 'NSIS compiler unavailable; build the bundle before running this test'
+}
+# Get-Command returns ApplicationInfo (.Source), whereas the fallback
+# Get-Item returns FileInfo (.FullName). Use a validated path in both cases.
 $key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\com.stackdeck.desktop'
 if(Test-Path -LiteralPath $key){throw 'Real historical registration exists; test cannot replace it'}
 $folder=Join-Path ([IO.Path]::GetTempPath()) ('StackDeck-NSIS-GuardQA-'+[Guid]::NewGuid().ToString('N'))
@@ -64,7 +69,7 @@ function RunHarness {
  return [int]$p.ExitCode
 }
 try{
- & $makensis.FullName /V2 $nsi |Out-Null
+ & $makensisPath /V2 $nsi |Out-Null
  $record.compile_exit=$LASTEXITCODE
  if($record.compile_exit -ne 0 -or !(Test-Path $exe)){throw 'Guard harness cannot compile'}
  $null=New-Item -Path $key -ErrorAction Stop
